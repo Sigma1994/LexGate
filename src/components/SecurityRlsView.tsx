@@ -10,6 +10,7 @@ import {
   ShieldAlert,
   X,
 } from 'lucide-react';
+import { safeFetchJson } from '../lib/safeFetchJson.ts';
 import type { GroupId, LedgerSnapshot, VerificationSuiteResponse } from '../shared/types.ts';
 
 interface SecurityRlsViewProps {
@@ -43,16 +44,17 @@ export const SecurityRlsView: React.FC<SecurityRlsViewProps> = ({
   const postAdmin = async (url: string, body: Record<string, unknown>, note: string) => {
     setBusyAction(url);
     try {
-      const res = await fetch(url, {
+      const { data } = await safeFetchJson<{ snapshot?: LedgerSnapshot }>(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
-      const data = await res.json();
       if (data.snapshot) {
         onSnapshotUpdate(data.snapshot);
       }
       setStatusNote(note);
+    } catch (err) {
+      setStatusNote(err instanceof Error ? err.message : 'Admin action failed.');
     } finally {
       setBusyAction(null);
     }

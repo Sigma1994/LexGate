@@ -16,6 +16,7 @@ import {
   Terminal,
   Zap,
 } from 'lucide-react';
+import { safeFetchJson } from '../lib/safeFetchJson.ts';
 import type {
   LedgerSnapshot,
   PipelineInspectResponse,
@@ -377,7 +378,7 @@ export const AiMlProcessView: React.FC<AiMlProcessViewProps> = ({
     setInspecting(true);
     setInspectError(null);
     try {
-      const res = await fetch('/api/pipeline/inspect', {
+      const { data } = await safeFetchJson<PipelineInspectResponse>('/api/pipeline/inspect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -386,11 +387,6 @@ export const AiMlProcessView: React.FC<AiMlProcessViewProps> = ({
           as_of: `${asOfDate}T00:00:00Z`,
         }),
       });
-      if (!res.ok) {
-        const errBody = (await res.json().catch(() => ({}))) as { error?: string };
-        throw new Error(errBody.error || `Inspection request failed (${res.status})`);
-      }
-      const data = (await res.json()) as PipelineInspectResponse;
       setInspectData(data);
     } catch (err) {
       setInspectError(err instanceof Error ? err.message : 'Unable to inspect pipeline.');

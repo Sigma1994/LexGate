@@ -7,6 +7,7 @@ import {
   ShieldBan,
   Upload,
 } from 'lucide-react';
+import { safeFetchJson } from '../lib/safeFetchJson.ts';
 import type {
   GroupId,
   LedgerSnapshot,
@@ -129,7 +130,10 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
     setUploadError(null);
     setUploadResult(null);
     try {
-      const res = await fetch('/api/admin/upload-document', {
+      const { data } = await safeFetchJson<{
+        upload: UploadDocumentResult;
+        snapshot?: LedgerSnapshot;
+      }>('/api/admin/upload-document', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -141,11 +145,6 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
           raw_text: rawText,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        setUploadError(data.error ?? 'Could not upload policy document.');
-        return;
-      }
       setUploadResult(data.upload);
       if (data.snapshot) {
         onSnapshotUpdate(data.snapshot);
@@ -158,13 +157,16 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
   };
 
   const testImmutability = async (quarantineId: string, op: 'UPDATE' | 'DELETE') => {
-    const res = await fetch('/api/admin/quarantine-test', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ quarantine_id: quarantineId, op }),
-    });
-    const data = await res.json();
-    setQuarantineTestResult(data.error ?? 'Blocked.');
+    try {
+      const { data } = await safeFetchJson<{ error?: string }>('/api/admin/quarantine-test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ quarantine_id: quarantineId, op }),
+      });
+      setQuarantineTestResult(data.error ?? 'Blocked.');
+    } catch (err) {
+      setQuarantineTestResult(err instanceof Error ? err.message : 'Blocked.');
+    }
   };
 
   const pypdfLines = extractionExhibit.pypdf_garbled.split('\n');

@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { BarChart3 } from 'lucide-react';
+import { safeFetchJson } from '../lib/safeFetchJson.ts';
 import type { GoldenSmokeQuestion, SmokeEvalVariantRow } from '../shared/types.ts';
 
 interface AblationEvalViewProps {
@@ -65,8 +66,11 @@ export const AblationEvalView: React.FC<AblationEvalViewProps> = ({
   const runSmoke = async () => {
     setRunningSmoke(true);
     try {
-      const res = await fetch('/api/eval/smoke', { method: 'POST' });
-      const data = await res.json();
+      const { data } = await safeFetchJson<{
+        ran_at: string;
+        question_count: number;
+        variants: SmokeEvalVariantRow[];
+      }>('/api/eval/smoke', { method: 'POST' });
       setSmokeResults(data);
     } finally {
       setRunningSmoke(false);

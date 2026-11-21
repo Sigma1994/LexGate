@@ -155,32 +155,42 @@ async function startServer() {
   void syncAllToLiveQdrantIfReachable();
 
   app.get('/api/system/status', async (req, res) => {
-    const force = req.query.refresh === '1';
-    let runtime = await getSystemRuntimeStatus(force);
-    if (runtime.qdrant.reachable && (runtime.qdrant.live_points ?? 0) === 0 && ledger.qdrantPoints.size > 0) {
-      await syncAllToLiveQdrantIfReachable();
-      runtime = await getSystemRuntimeStatus(true);
+    try {
+      const force = req.query.refresh === '1';
+      let runtime = await getSystemRuntimeStatus(force);
+      if (runtime.qdrant.reachable && (runtime.qdrant.live_points ?? 0) === 0 && ledger.qdrantPoints.size > 0) {
+        await syncAllToLiveQdrantIfReachable();
+        runtime = await getSystemRuntimeStatus(true);
+      }
+      return res.json(runtime);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unable to read system runtime status.';
+      return res.status(500).json({ error: message });
     }
-    res.json(runtime);
   });
 
   app.get('/api/snapshot', async (_req, res) => {
-    let runtime = await getSystemRuntimeStatus();
-    if (runtime.qdrant.reachable && (runtime.qdrant.live_points ?? 0) === 0 && ledger.qdrantPoints.size > 0) {
-      await syncAllToLiveQdrantIfReachable();
-      runtime = await getSystemRuntimeStatus(true);
+    try {
+      let runtime = await getSystemRuntimeStatus();
+      if (runtime.qdrant.reachable && (runtime.qdrant.live_points ?? 0) === 0 && ledger.qdrantPoints.size > 0) {
+        await syncAllToLiveQdrantIfReachable();
+        runtime = await getSystemRuntimeStatus(true);
+      }
+      return res.json({
+        snapshot: ledger.getSnapshot(),
+        runtime,
+        exhibits: {
+          extraction: EXTRACTION_EXHIBIT,
+          adrs: ADRS,
+          ddl: DDL_REFERENCE_SNIPPET,
+          benchmark_distribution: GOLDEN_BENCHMARK_DISTRIBUTION,
+          smoke_questions: SMOKE_EVAL_QUESTIONS,
+        },
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unable to load snapshot.';
+      return res.status(500).json({ error: message });
     }
-    res.json({
-      snapshot: ledger.getSnapshot(),
-      runtime,
-      exhibits: {
-        extraction: EXTRACTION_EXHIBIT,
-        adrs: ADRS,
-        ddl: DDL_REFERENCE_SNIPPET,
-        benchmark_distribution: GOLDEN_BENCHMARK_DISTRIBUTION,
-        smoke_questions: SMOKE_EVAL_QUESTIONS,
-      },
-    });
   });
 
   app.post('/api/query', async (req, res) => {
@@ -216,8 +226,8 @@ async function startServer() {
         snapshot: ledger.getSnapshot(),
       });
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Query execution failed.';
-      return res.status(502).json({ error: message });
+      const message = err instanceof Error ? err.message : String(err || 'Query execution failed.');
+      return res.status(500).json({ error: message });
     }
   });
 
@@ -439,6 +449,20 @@ async function startServer() {
   app.post('/api/eval/smoke', (_req, res) => {
     const smoke = runDevSmokeEval(ledger);
     return res.json(smoke);
+  });
+
+  app.use('/api', (_req, res) => {
+    return res.status(404).json({ error: 'API endpoint not found.' });
+  });
+
+  app.use((err: unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (req.path.startsWith('/api')) {
+      const message = err instanceof Error ? err.message : 'Unexpected server error.';
+      if (!res.headersSent) {
+        return res.status(500).json({ error: message });
+      }
+    }
+    return next(err);
   });
 
   if (process.env.NODE_ENV === 'production') {

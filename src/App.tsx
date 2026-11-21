@@ -14,6 +14,7 @@ import { IngestionQuarantineView } from './components/IngestionQuarantineView.ts
 import { QueryConsole } from './components/QueryConsole.tsx';
 import { SecurityRlsView } from './components/SecurityRlsView.tsx';
 import { TopBar, type WorkspaceTab } from './components/TopBar.tsx';
+import { safeFetchJson } from './lib/safeFetchJson.ts';
 import type {
   GoldenSmokeQuestion,
   LedgerSnapshot,
@@ -59,11 +60,11 @@ export default function App() {
   const loadSnapshot = async () => {
     try {
       setLoadError(null);
-      const res = await fetch('/api/snapshot');
-      if (!res.ok) {
-        throw new Error(`Failed to load snapshot (${res.status})`);
-      }
-      const data = await res.json();
+      const { data } = await safeFetchJson<{
+        snapshot: LedgerSnapshot;
+        runtime?: SystemRuntimeStatus;
+        exhibits: ExhibitsPayload;
+      }>('/api/snapshot');
       setSnapshot(data.snapshot);
       if (data.runtime) setRuntime(data.runtime);
       setExhibits(data.exhibits);
@@ -73,10 +74,11 @@ export default function App() {
   };
 
   const refreshRuntime = async () => {
-    const res = await fetch('/api/system/status?refresh=1');
-    if (res.ok) {
-      const data = (await res.json()) as SystemRuntimeStatus;
+    try {
+      const { data } = await safeFetchJson<SystemRuntimeStatus>('/api/system/status?refresh=1');
       setRuntime(data);
+    } catch {
+      // Keep previous runtime state if refresh fails transiently
     }
   };
 
@@ -98,8 +100,9 @@ export default function App() {
   const handleRunVerification = async () => {
     setIsVerifying(true);
     try {
-      const res = await fetch('/api/tests/run', { method: 'POST' });
-      const data = await res.json();
+      const { data } = await safeFetchJson<VerificationSuiteResponse>('/api/tests/run', {
+        method: 'POST',
+      });
       setVerification(data);
       setActiveTab('security');
     } finally {
@@ -130,12 +133,11 @@ export default function App() {
         label: snapshot?.index_worker_paused ? 'Resume Background Search Sync' : 'Pause Background Search Sync',
         hint: snapshot?.index_worker_paused ? 'Paused' : 'Active',
         run: async () => {
-          const res = await fetch('/api/admin/worker', {
+          const { data } = await safeFetchJson<{ snapshot?: LedgerSnapshot }>('/api/admin/worker', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ paused: !snapshot?.index_worker_paused }),
           });
-          const data = await res.json();
           if (data.snapshot) setSnapshot(data.snapshot);
         },
       },
@@ -144,8 +146,9 @@ export default function App() {
         section: 'Background Sync',
         label: 'Catch Up Search Copy Now',
         run: async () => {
-          const res = await fetch('/api/admin/reconcile', { method: 'POST' });
-          const data = await res.json();
+          const { data } = await safeFetchJson<{ snapshot?: LedgerSnapshot }>('/api/admin/reconcile', {
+            method: 'POST',
+          });
           if (data.snapshot) setSnapshot(data.snapshot);
         },
       },
@@ -154,8 +157,9 @@ export default function App() {
         section: 'Demo Data',
         label: 'Restore Default Permissions',
         run: async () => {
-          const res = await fetch('/api/admin/reset', { method: 'POST' });
-          const data = await res.json();
+          const { data } = await safeFetchJson<{ snapshot?: LedgerSnapshot }>('/api/admin/reset', {
+            method: 'POST',
+          });
           if (data.snapshot) setSnapshot(data.snapshot);
         },
       },

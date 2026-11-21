@@ -14,6 +14,7 @@ import {
   UserX,
 } from 'lucide-react';
 import { motion } from 'motion/react';
+import { safeFetchJson } from '../lib/safeFetchJson.ts';
 import type {
   ExecutionMode,
   LedgerSnapshot,
@@ -159,22 +160,20 @@ export const QueryConsole: React.FC<QueryConsoleProps> = ({
     setLoading(true);
     setErrorMsg(null);
     try {
-      const res = await fetch('/api/query', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          principal_id: pid,
-          as_of: `${asOf}T00:00:00Z`,
-          query: q,
-          execution_mode: executionMode,
-          bypass_cache: bypassCache,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setErrorMsg(data.error ?? 'Could not run this question.');
-        return;
-      }
+      const { data } = await safeFetchJson<{ result: QueryResponse; snapshot?: LedgerSnapshot }>(
+        '/api/query',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            principal_id: pid,
+            as_of: `${asOf}T00:00:00Z`,
+            query: q,
+            execution_mode: executionMode,
+            bypass_cache: bypassCache,
+          }),
+        }
+      );
       setResponse(data.result);
       if (data.result?.trace?.stage3?.dropped_by_rls_count > 0) {
         setSelectedStage(3);
