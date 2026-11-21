@@ -1,0 +1,6 @@
+{
+  "name": "LexGate Regulatory Assistant",
+  "description": "Ask questions about banking and financial rules with automatic privacy protection, historical date accuracy, and verified source quotes.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
