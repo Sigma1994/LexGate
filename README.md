@@ -47,6 +47,18 @@ Open `http://localhost:3000`.
 - All uploads in **Policy Library** write directly into Qdrant + the ledger, and **Ask Questions** routes to local **Ollama (`llama3.1:8b`)** by default with `0` outbound bytes.
 - In cloud preview environments where localhost containers are unavailable, `LLM_PROVIDER=auto` seamlessly uses the embedded vector index, in-memory epoch cache, and server-side Gemini (`GEMINI_API_KEY`).
 
+### Optional: Batch Ingest Local `.pdf` Files (`PyMuPDF` / `Unstructured` / `all-MiniLM-L6-v2`)
+
+While **Policy Library** supports direct paste and `.txt`/`.md`/`.csv` uploads in the browser, you can batch-ingest binary `.pdf` files locally using `scripts/ingest_pdfs.py`:
+
+```bash
+pip install -r scripts/requirements-ingest.txt
+python scripts/ingest_pdfs.py --dir ./pdfs --parser pymupdf --sensitivity compliance_officer --effective-from 2026-01-01
+```
+
+- `--mode api` *(default)* extracts pages & tables with PyMuPDF (or `--parser unstructured`) and sends them to `POST /api/admin/upload-document`, automatically running Safety Hold table checks, Parent-Child ledger indexing, Ollama `nomic-embed-text` 768-dim embeddings, and Qdrant upsert.
+- `--mode direct-qdrant` embeds locally on CPU using `all-MiniLM-L6-v2` (384 dims) into a standalone Qdrant collection (`--collection lexgate_minilm_384`).
+
 ## Key Capabilities
 
 - **Rich 2025–2026 Regulatory Corpus:** Covers Central Bank of Kenya Act (Cap. 491, 1966–2012), Capital Adequacy (CBK/PG/03), Liquidity Circular 11/2024, OAG Audit Report, Banking (Amendment) Act 2025, ODPC Financial Data Protection 2025, CBK Cyber Resilience & AI Governance 2026, AML/CFT & VASP Travel Rule 2026, IFRS 9 Credit Loss 2026, and Internal Audit FX/Insider Lending 2026.

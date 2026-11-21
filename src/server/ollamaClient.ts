@@ -7,6 +7,9 @@ export interface OllamaProbeResult {
   embed_model: string;
   installed_models: string[];
   note: string;
+  error_reason: string | null;
+  checked_at: string;
+  latency_ms: number;
 }
 
 export interface GroundedLlmCitation {
@@ -23,6 +26,19 @@ export interface GroundedLlmOutput {
 }
 
 export const OLLAMA_EMBED_DIMS = 768;
+
+function describeProbeError(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  const cause = (err as Error & { cause?: { code?: string; message?: string; address?: string; port?: number } }).cause;
+  if (cause?.code) {
+    const target = cause.address && cause.port ? ` (${cause.address}:${cause.port})` : '';
+    return `${cause.code}${target}: ${err.message}`;
+  }
+  if (err.name === 'TimeoutError' || err.name === 'AbortError') {
+    return `Connection timed out after 700ms`;
+  }
+  return err.message;
+}
 
 function getOllamaUrl(): string {
   const raw = (process.env.OLLAMA_URL?.trim() || 'http://localhost:11434').replace(/\/+$/, '');
@@ -49,12 +65,16 @@ export async function probeOllama(forceRefresh = false): Promise<OllamaProbeResu
 
   const url = getOllamaUrl();
   const { chatModel, embedModel } = getOllamaModels();
+  const t0 = performance.now();
+  const checkedAt = new Date().toISOString();
 
   try {
     const res = await fetch(`${url}/api/tags`, {
       signal: AbortSignal.timeout(700),
     });
+    const latencyMs = Math.max(1, Math.round(performance.now() - t0));
     if (!res.ok) {
+      const reason = `GET ${url}/api/tags returned HTTP ${res.status} ${res.statusText}`.trim();
       const fail: OllamaProbeResult = {
         available: false,
         url,
@@ -62,30 +82,53 @@ export async function probeOllama(forceRefresh = false): Promise<OllamaProbeResu
         embed_model: embedModel,
         installed_models: [],
         note: `Ollama responded with HTTP ${res.status} at ${url}.`,
+        error_reason: reason,
+        checked_at: checkedAt,
+        latency_ms: latencyMs,
       };
       cachedProbe = { at: Date.now(), result: fail };
       return fail;
     }
     const data = (await res.json()) as { models?: Array<{ name: string }> };
     const installed = (data.models ?? []).map((m) => m.name);
+    const hasChat = installed.some((m) => m === chatModel || m.startsWith(`${chatModel}:`));
+    const hasEmbed = installed.some((m) => m === embedModel || m.startsWith(`${embedModel}:`));
+    const missing: string[] = [];
+    if (!hasChat) missing.push(chatModel);
+    if (!hasEmbed) missing.push(embedModel);
+
     const ok: OllamaProbeResult = {
       available: true,
       url,
       chat_model: chatModel,
       embed_model: embedModel,
       installed_models: installed,
-      note: `Connected to local Ollama (${installed.length} model(s) ready).`,
+      note:
+        missing.length === 0
+          ? `Connected to Ollama (${installed.length} model(s) ready).`
+          : `Connected to Ollama, but missing model(s): ${missing.join(', ')}. Run ollama pull.`,
+      error_reason:
+        missing.length > 0
+          ? `Model(s) not pulled yet in Ollama: ${missing.join(', ')}`
+          : null,
+      checked_at: checkedAt,
+      latency_ms: latencyMs,
     };
     cachedProbe = { at: Date.now(), result: ok };
     return ok;
-  } catch {
+  } catch (err) {
+    const latencyMs = Math.max(1, Math.round(performance.now() - t0));
+    const reason = `Failed to reach ${url}/api/tags — ${describeProbeError(err)}`;
     const offline: OllamaProbeResult = {
       available: false,
       url,
       chat_model: chatModel,
       embed_model: embedModel,
       installed_models: [],
-      note: `Ollama not detected at ${url} (cloud preview uses Gemini; local git clone connects to Ollama automatically).`,
+      note: `Ollama unreachable at ${url}; using Cloud Gemini in preview.`,
+      error_reason: reason,
+      checked_at: checkedAt,
+      latency_ms: latencyMs,
     };
     cachedProbe = { at: Date.now(), result: offline };
     return offline;

@@ -115,6 +115,11 @@ export interface StageTrace {
   };
   stage2: {
     qdrant_filter_summary: string;
+    vector_backend: 'live_qdrant_http' | 'embedded_vector_index';
+    qdrant_url: string;
+    qdrant_collection: string;
+    live_qdrant_hits: number;
+    embedding_model: string;
     with_payload: false;
     candidate_count: number;
     candidates: Array<{
@@ -243,14 +248,29 @@ export interface LedgerSnapshot {
   };
 }
 
+export interface ServiceConnectionLog {
+  service: 'Ollama LLM' | 'Qdrant Vector DB' | 'Redis Cache' | 'Cloud Gemini';
+  endpoint: string;
+  status: 'connected' | 'fallback' | 'not_configured';
+  active_target: string;
+  details: string;
+  error_reason: string | null;
+  checked_at: string;
+  latency_ms: number;
+}
+
 export interface SystemRuntimeStatus {
   qdrant: {
     mode: 'live_http' | 'embedded_memory';
     url: string;
     collection: string;
+    collections: string[];
     reachable: boolean;
     live_points: number | null;
     note: string;
+    error_reason: string | null;
+    checked_at: string;
+    latency_ms: number;
   };
   ollama: {
     available: boolean;
@@ -259,6 +279,9 @@ export interface SystemRuntimeStatus {
     embed_model: string;
     installed_models: string[];
     note: string;
+    error_reason: string | null;
+    checked_at: string;
+    latency_ms: number;
   };
   redis: {
     mode: 'live_redis' | 'embedded_memory';
@@ -267,10 +290,15 @@ export interface SystemRuntimeStatus {
     ttl_seconds: number;
     live_keys: number | null;
     note: string;
+    error_reason: string | null;
+    checked_at: string;
+    latency_ms: number;
   };
   llm_provider_setting: 'auto' | 'ollama' | 'gemini';
   active_default_llm: string;
   gemini_configured: boolean;
+  gemini_model: string;
+  connection_logs: ServiceConnectionLog[];
 }
 
 export interface UploadDocumentResult {

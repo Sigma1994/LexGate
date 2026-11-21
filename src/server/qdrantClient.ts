@@ -5,9 +5,26 @@ export interface QdrantProbeResult {
   mode: 'live_http' | 'embedded_memory';
   url: string;
   collection: string;
+  collections: string[];
   reachable: boolean;
   live_points: number | null;
   note: string;
+  error_reason: string | null;
+  checked_at: string;
+  latency_ms: number;
+}
+
+function describeQdrantError(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  const cause = (err as Error & { cause?: { code?: string; address?: string; port?: number } }).cause;
+  if (cause?.code) {
+    const target = cause.address && cause.port ? ` (${cause.address}:${cause.port})` : '';
+    return `${cause.code}${target}: ${err.message}`;
+  }
+  if (err.name === 'TimeoutError' || err.name === 'AbortError') {
+    return 'Connection timed out after 700ms';
+  }
+  return err.message;
 }
 
 function getQdrantConfig(): { url: string; collection: string; apiKey?: string } {
@@ -17,7 +34,9 @@ function getQdrantConfig(): { url: string; collection: string; apiKey?: string }
     throw new Error('QDRANT_URL must use http or https.');
   }
   const collection = process.env.QDRANT_COLLECTION?.trim() || 'lexgate_policies';
-  const apiKey = process.env.QDRANT_API_KEY?.trim() || undefined;
+  const rawApiKey = (process.env.QDRANT_API_KEY ?? '').trim();
+  const apiKey =
+    !rawApiKey || rawApiKey === '""' || rawApiKey === "''" ? undefined : rawApiKey;
   return { url: parsed.toString().replace(/\/+$/, ''), collection, apiKey };
 }
 
@@ -36,54 +55,85 @@ export async function probeQdrant(forceRefresh = false): Promise<QdrantProbeResu
     return cachedQdrantProbe.result;
   }
   const { url, collection, apiKey } = getQdrantConfig();
+  const t0 = performance.now();
+  const checkedAt = new Date().toISOString();
+  let errorReason: string | null = null;
+
   try {
-    const res = await fetch(`${url}/collections/${encodeURIComponent(collection)}`, {
+    const listRes = await fetch(`${url}/collections`, {
       headers: qdrantHeaders(apiKey),
       signal: AbortSignal.timeout(700),
     });
-    if (res.ok) {
-      const payload = (await res.json()) as { result?: { points_count?: number } };
-      const ok: QdrantProbeResult = {
-        mode: 'live_http',
-        url,
-        collection,
-        reachable: true,
-        live_points: payload.result?.points_count ?? 0,
-        note: `Connected to live Qdrant collection '${collection}'.`,
+
+    if (!listRes.ok) {
+      errorReason = `GET ${url}/collections returned HTTP ${listRes.status} ${listRes.statusText}${
+        listRes.status === 401 || listRes.status === 403 ? ' (check QDRANT_API_KEY)' : ''
+      }`.trim();
+    } else {
+      const listPayload = (await listRes.json()) as {
+        result?: { collections?: Array<{ name: string }> };
       };
-      cachedQdrantProbe = { at: Date.now(), result: ok };
-      return ok;
-    }
-    if (res.status === 404) {
-      // Qdrant server is alive; collection just needs initialization
-      const rootRes = await fetch(`${url}/collections`, {
+      const collections = (listPayload.result?.collections ?? []).map((c) => c.name);
+
+      const colRes = await fetch(`${url}/collections/${encodeURIComponent(collection)}`, {
         headers: qdrantHeaders(apiKey),
         signal: AbortSignal.timeout(700),
       });
-      if (rootRes.ok) {
+      const latencyMs = Math.max(1, Math.round(performance.now() - t0));
+
+      if (colRes.ok) {
+        const payload = (await colRes.json()) as { result?: { points_count?: number } };
+        const ok: QdrantProbeResult = {
+          mode: 'live_http',
+          url,
+          collection,
+          collections,
+          reachable: true,
+          live_points: payload.result?.points_count ?? 0,
+          note: `Connected to live Qdrant collection '${collection}'.`,
+          error_reason: null,
+          checked_at: checkedAt,
+          latency_ms: latencyMs,
+        };
+        cachedQdrantProbe = { at: Date.now(), result: ok };
+        return ok;
+      }
+
+      if (colRes.status === 404) {
         const ready: QdrantProbeResult = {
           mode: 'live_http',
           url,
           collection,
+          collections,
           reachable: true,
           live_points: 0,
           note: `Connected to Qdrant at ${url}; collection '${collection}' ready to initialize.`,
+          error_reason: null,
+          checked_at: checkedAt,
+          latency_ms: latencyMs,
         };
         cachedQdrantProbe = { at: Date.now(), result: ready };
         return ready;
       }
+
+      errorReason = `GET ${url}/collections/${collection} returned HTTP ${colRes.status} ${colRes.statusText}`.trim();
     }
-  } catch {
-    // Qdrant not running locally in cloud sandbox
+  } catch (err) {
+    errorReason = `Failed to reach ${url}/collections — ${describeQdrantError(err)}`;
   }
 
+  const latencyMs = Math.max(1, Math.round(performance.now() - t0));
   const fallback: QdrantProbeResult = {
     mode: 'embedded_memory',
     url,
     collection,
+    collections: [],
     reachable: false,
     live_points: null,
-    note: `Using embedded vector index in cloud preview (auto-connects to ${url} on local clone).`,
+    note: `Using embedded vector index fallback (${url} unreachable).`,
+    error_reason: errorReason,
+    checked_at: checkedAt,
+    latency_ms: latencyMs,
   };
   cachedQdrantProbe = { at: Date.now(), result: fallback };
   return fallback;
@@ -231,11 +281,14 @@ export async function searchQdrantLive(
   allowedGroups: GroupId[],
   asOfSec: number,
   limit = 50
-): Promise<Array<{ chunk_id: string; score: number }> | null> {
+): Promise<{
+  hits: Array<{ chunk_id: string; score: number }>;
+  embedding_source: string;
+} | null> {
   const probe = await probeQdrant();
   if (!probe.reachable) return null;
 
-  const { vector } = await embedTextWithOllamaOrFallback(query);
+  const { vector, source } = await embedTextWithOllamaOrFallback(query);
   const { url, collection, apiKey } = getQdrantConfig();
   try {
     const res = await fetch(
@@ -260,7 +313,10 @@ export async function searchQdrantLive(
     );
     if (!res.ok) return null;
     const data = (await res.json()) as { result?: Array<{ id: string; score: number }> };
-    return (data.result ?? []).map((r) => ({ chunk_id: String(r.id), score: r.score }));
+    return {
+      hits: (data.result ?? []).map((r) => ({ chunk_id: String(r.id), score: r.score })),
+      embedding_source: source,
+    };
   } catch {
     return null;
   }

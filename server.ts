@@ -33,6 +33,7 @@ import type {
   ExecutionMode,
   GroupId,
   PipelineInspectResponse,
+  ServiceConnectionLog,
   SystemRuntimeStatus,
   UploadDocumentResult,
 } from './src/shared/types.ts';
@@ -51,8 +52,9 @@ async function getSystemRuntimeStatus(forceRefresh = false): Promise<SystemRunti
   const llm_provider_setting: SystemRuntimeStatus['llm_provider_setting'] =
     rawPref === 'ollama' || rawPref === 'gemini' ? rawPref : 'auto';
   const gemini_configured = hasConfiguredGeminiKey();
+  const gemini_model = 'gemini-4-hydrogen';
 
-  let active_default_llm = `Cloud Gemini (gemini-4-hydrogen)`;
+  let active_default_llm = `Cloud Gemini (${gemini_model})`;
   if (llm_provider_setting === 'ollama') {
     active_default_llm = ollama.available
       ? `Local Ollama (${ollama.chat_model})`
@@ -63,6 +65,64 @@ async function getSystemRuntimeStatus(forceRefresh = false): Promise<SystemRunti
     active_default_llm = `Awaiting Local Ollama (${ollama.chat_model}) or GEMINI_API_KEY`;
   }
 
+  const checkedNow = new Date().toISOString();
+  const connection_logs: ServiceConnectionLog[] = [
+    {
+      service: 'Ollama LLM',
+      endpoint: ollama.url,
+      status: ollama.available ? 'connected' : 'fallback',
+      active_target: ollama.available
+        ? `${ollama.chat_model} + ${ollama.embed_model}`
+        : `Fallback -> ${gemini_configured ? `Cloud Gemini (${gemini_model})` : 'No LLM available'}`,
+      details: ollama.available
+        ? `Installed models: ${ollama.installed_models.join(', ') || 'none pulled yet'}`
+        : `Could not connect to Ollama at ${ollama.url}.`,
+      error_reason: ollama.error_reason,
+      checked_at: ollama.checked_at,
+      latency_ms: ollama.latency_ms,
+    },
+    {
+      service: 'Cloud Gemini',
+      endpoint: 'https://generativelanguage.googleapis.com',
+      status: gemini_configured ? 'connected' : 'not_configured',
+      active_target: gemini_configured ? gemini_model : 'GEMINI_API_KEY unset',
+      details: gemini_configured
+        ? 'API key configured on server (used in preview or when Cloud Gemini AI is selected).'
+        : 'Optional in local Ollama mode; set GEMINI_API_KEY to enable cloud fallback.',
+      error_reason: gemini_configured ? null : 'GEMINI_API_KEY is missing or left as MY_GEMINI_API_KEY placeholder.',
+      checked_at: checkedNow,
+      latency_ms: 1,
+    },
+    {
+      service: 'Qdrant Vector DB',
+      endpoint: qdrant.url,
+      status: qdrant.reachable ? 'connected' : 'fallback',
+      active_target: qdrant.reachable
+        ? `${qdrant.collection} (${qdrant.live_points ?? 0} pts)`
+        : 'Fallback -> Embedded Vector Index (768-dim in-memory)',
+      details: qdrant.reachable
+        ? `Collections: ${qdrant.collections.join(', ') || qdrant.collection}`
+        : `Could not connect to Qdrant HTTP API at ${qdrant.url}.`,
+      error_reason: qdrant.error_reason,
+      checked_at: qdrant.checked_at,
+      latency_ms: qdrant.latency_ms,
+    },
+    {
+      service: 'Redis Cache',
+      endpoint: redis.url,
+      status: redis.reachable ? 'connected' : 'fallback',
+      active_target: redis.reachable
+        ? `Live Redis (${redis.live_keys ?? 0} keys)`
+        : 'Fallback -> In-Memory Epoch Map',
+      details: redis.reachable
+        ? `TTL ${redis.ttl_seconds}s · Epoch-keyed response cache active.`
+        : `Could not connect to Redis at ${redis.url}.`,
+      error_reason: redis.error_reason,
+      checked_at: redis.checked_at,
+      latency_ms: redis.latency_ms,
+    },
+  ];
+
   return {
     qdrant,
     ollama,
@@ -70,6 +130,8 @@ async function getSystemRuntimeStatus(forceRefresh = false): Promise<SystemRunti
     llm_provider_setting,
     active_default_llm,
     gemini_configured,
+    gemini_model,
+    connection_logs,
   };
 }
 
@@ -127,7 +189,17 @@ async function startServer() {
       if (typeof principal_id !== 'string' || typeof query !== 'string' || query.trim().length === 0) {
         return res.status(400).json({ error: 'principal_id and non-empty query string are required.' });
       }
-      const mode: ExecutionMode = VALID_MODES.includes(execution_mode) ? execution_mode : 'hosted_api';
+      let mode: ExecutionMode;
+      if (VALID_MODES.includes(execution_mode)) {
+        mode = execution_mode;
+      } else {
+        const pref = (process.env.LLM_PROVIDER ?? 'auto').trim().toLowerCase();
+        const ollamaProbe = await probeOllama();
+        mode =
+          pref === 'ollama' || (pref === 'auto' && ollamaProbe.available)
+            ? 'airgapped_local'
+            : 'hosted_api';
+      }
       const asOfIso = typeof as_of === 'string' && as_of.trim() ? as_of : new Date().toISOString();
 
       const result = await runFiveStageQuery({

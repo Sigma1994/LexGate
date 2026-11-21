@@ -8,6 +8,9 @@ export interface RedisProbeResult {
   ttl_seconds: number;
   live_keys: number | null;
   note: string;
+  error_reason: string | null;
+  checked_at: string;
+  latency_ms: number;
 }
 
 const KEY_PREFIX = 'lexgate:';
@@ -53,19 +56,19 @@ function getOrCreateClient(): Redis {
   return instance;
 }
 
-async function ensureConnected(): Promise<boolean> {
+async function ensureConnected(): Promise<{ connected: boolean; reason: string | null }> {
   try {
     const r = getOrCreateClient();
-    if (r.status === 'ready') return true;
+    if (r.status === 'ready') return { connected: true, reason: null };
     if (r.status === 'end' || r.status === 'close') {
       client = null;
       const fresh = getOrCreateClient();
       await fresh.connect();
-      return true;
+      return { connected: true, reason: null };
     }
     await r.connect();
-    return true;
-  } catch {
+    return { connected: true, reason: null };
+  } catch (err) {
     if (client && client.status !== 'ready') {
       try {
         client.disconnect(false);
@@ -74,7 +77,8 @@ async function ensureConnected(): Promise<boolean> {
       }
       client = null;
     }
-    return false;
+    const reason = err instanceof Error ? err.message : String(err);
+    return { connected: false, reason };
   }
 }
 
@@ -85,13 +89,19 @@ export async function probeRedis(forceRefresh = false): Promise<RedisProbeResult
 
   const { url, ttlSeconds } = getRedisConfig();
   const safeUrl = redactRedisUrl(url);
+  const t0 = performance.now();
+  const checkedAt = new Date().toISOString();
+  let errorReason: string | null = null;
 
   try {
-    const connected = await ensureConnected();
-    if (connected && client) {
+    const conn = await ensureConnected();
+    if (!conn.connected) {
+      errorReason = `Failed to reach ${safeUrl} — ${conn.reason ?? 'connection failed'}`;
+    } else if (client) {
       const pong = await client.ping();
       if (pong === 'PONG') {
         const keysCount = await client.dbsize();
+        const latencyMs = Math.max(1, Math.round(performance.now() - t0));
         const ok: RedisProbeResult = {
           mode: 'live_redis',
           url: safeUrl,
@@ -99,22 +109,30 @@ export async function probeRedis(forceRefresh = false): Promise<RedisProbeResult
           ttl_seconds: ttlSeconds,
           live_keys: keysCount,
           note: `Connected to live Redis (${keysCount} key(s), TTL ${ttlSeconds}s).`,
+          error_reason: null,
+          checked_at: checkedAt,
+          latency_ms: latencyMs,
         };
         cachedProbe = { at: Date.now(), result: ok };
         return ok;
       }
+      errorReason = `Redis PING returned unexpected response: ${pong}`;
     }
-  } catch {
-    // Redis offline in cloud preview
+  } catch (err) {
+    errorReason = `Failed to ping ${safeUrl} — ${err instanceof Error ? err.message : String(err)}`;
   }
 
+  const latencyMs = Math.max(1, Math.round(performance.now() - t0));
   const fallback: RedisProbeResult = {
     mode: 'embedded_memory',
     url: safeUrl,
     reachable: false,
     ttl_seconds: ttlSeconds,
     live_keys: null,
-    note: `Using in-process epoch Map cache in preview (auto-connects to ${safeUrl} on local clone).`,
+    note: `Using in-process epoch Map cache (${safeUrl} unreachable).`,
+    error_reason: errorReason,
+    checked_at: checkedAt,
+    latency_ms: latencyMs,
   };
   cachedProbe = { at: Date.now(), result: fallback };
   return fallback;

@@ -11,6 +11,7 @@ import {
 import { probeQdrant, searchQdrantLive } from './qdrantClient.ts';
 import {
   getCachedQueryFromRedis,
+  probeRedis,
   setCachedQueryInRedis,
 } from './redisClient.ts';
 import type {
@@ -144,8 +145,14 @@ export async function runFiveStageQuery({
     }
   }
 
+  const redisProbe = await probeRedis();
+  const cacheBackend: 'live_redis' | 'embedded_memory' = redisProbe.reachable
+    ? 'live_redis'
+    : 'embedded_memory';
+
   // Empty-group short-circuit before calling Qdrant
   if (activeGroups.length === 0) {
+    const qdrantProbeEmpty = await probeQdrant();
     return buildAbstentionResult({
       ledger,
       principalId,
@@ -153,11 +160,17 @@ export async function runFiveStageQuery({
       activeGroups,
       asOfIso,
       cacheKey,
+      cacheBackend,
       queryHash,
       executionMode,
       startedAt,
       shortCircuited: true,
       qdrantFilterSummary: 'Skipped (this account has no active permissions)',
+      vectorBackend: qdrantProbeEmpty.reachable ? 'live_qdrant_http' : 'embedded_vector_index',
+      qdrantUrl: qdrantProbeEmpty.url,
+      qdrantCollection: qdrantProbeEmpty.collection,
+      liveQdrantHits: 0,
+      embeddingModel: 'Skipped (no active permissions)',
       qdrantCandidates: [],
       droppedReasons: [],
       reason: 'This user account is turned off or does not have permission to read any documents.',
@@ -172,33 +185,42 @@ export async function runFiveStageQuery({
 
   const embeddedCandidates = ledger.qdrantHybridSearch(query, activeGroups, asOfMs, 'hybrid_rrf', 50);
   let qdrantCandidates = embeddedCandidates;
+  let vectorBackend: 'live_qdrant_http' | 'embedded_vector_index' = 'embedded_vector_index';
+  let liveQdrantHits = 0;
+  let embeddingModel = 'Embedded TF/Hash 768d (Qdrant offline in preview)';
 
   if (qdrantProbe.reachable) {
-    const liveHits = await searchQdrantLive(query, activeGroups, asOfSec, 50);
-    if (liveHits && liveHits.length > 0) {
-      const mergedMap = new Map<string, (typeof embeddedCandidates)[number]>();
-      for (const c of embeddedCandidates) {
-        mergedMap.set(c.chunk_id, c);
-      }
-      liveHits.forEach((hit, idx) => {
-        const pt = ledger.qdrantPoints.get(hit.chunk_id);
-        if (!pt) return;
-        const existing = mergedMap.get(hit.chunk_id);
-        const liveRrf = 1 / (60 + idx + 1) + Math.max(0, hit.score) * 0.4;
-        if (existing) {
-          existing.rrf_score = Number(Math.max(existing.rrf_score, liveRrf).toFixed(4));
-        } else if (hit.score > 0.35) {
-          mergedMap.set(hit.chunk_id, {
-            chunk_id: pt.chunk_id,
-            doc_id: pt.doc_id,
-            rrf_score: Number(liveRrf.toFixed(4)),
-            qdrant_allowed_groups: [...pt.allowed_groups],
-          });
+    const liveResult = await searchQdrantLive(query, activeGroups, asOfSec, 50);
+    if (liveResult) {
+      vectorBackend = 'live_qdrant_http';
+      liveQdrantHits = liveResult.hits.length;
+      embeddingModel = liveResult.embedding_source;
+
+      if (liveResult.hits.length > 0) {
+        const mergedMap = new Map<string, (typeof embeddedCandidates)[number]>();
+        for (const c of embeddedCandidates) {
+          mergedMap.set(c.chunk_id, c);
         }
-      });
-      qdrantCandidates = Array.from(mergedMap.values())
-        .sort((a, b) => b.rrf_score - a.rrf_score)
-        .slice(0, 50);
+        liveResult.hits.forEach((hit, idx) => {
+          const pt = ledger.qdrantPoints.get(hit.chunk_id);
+          if (!pt) return;
+          const existing = mergedMap.get(hit.chunk_id);
+          const liveRrf = 1 / (60 + idx + 1) + Math.max(0, hit.score) * 0.4;
+          if (existing) {
+            existing.rrf_score = Number(Math.max(existing.rrf_score, liveRrf).toFixed(4));
+          } else if (hit.score > 0.35) {
+            mergedMap.set(hit.chunk_id, {
+              chunk_id: pt.chunk_id,
+              doc_id: pt.doc_id,
+              rrf_score: Number(liveRrf.toFixed(4)),
+              qdrant_allowed_groups: [...pt.allowed_groups],
+            });
+          }
+        });
+        qdrantCandidates = Array.from(mergedMap.values())
+          .sort((a, b) => b.rrf_score - a.rrf_score)
+          .slice(0, 50);
+      }
     }
   }
 
@@ -271,11 +293,17 @@ export async function runFiveStageQuery({
       activeGroups,
       asOfIso,
       cacheKey,
+      cacheBackend,
       queryHash,
       executionMode,
       startedAt,
       shortCircuited: false,
       qdrantFilterSummary,
+      vectorBackend,
+      qdrantUrl: qdrantProbe.url,
+      qdrantCollection: qdrantProbe.collection,
+      liveQdrantHits,
+      embeddingModel,
       qdrantCandidates,
       droppedReasons,
       reason:
@@ -350,35 +378,49 @@ export async function runFiveStageQuery({
     parsed = await ollamaGenerateGroundedAnswer(RAG_SYSTEM_INSTRUCTION, promptPayload);
   } else {
     const ai = getGeminiClient();
-    const response = await ai.models.generateContent({
-      model: GEMINI_MODEL,
-      contents: promptPayload,
-      config: {
-        systemInstruction: RAG_SYSTEM_INSTRUCTION,
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            sufficient_evidence: { type: Type.BOOLEAN },
-            answer: { type: Type.STRING },
-            citations: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  doc_title: { type: Type.STRING },
-                  version_label: { type: Type.STRING },
-                  page_number: { type: Type.INTEGER },
-                  quoted_span: { type: Type.STRING },
+    const callGemini = () =>
+      ai.models.generateContent({
+        model: GEMINI_MODEL,
+        contents: promptPayload,
+        config: {
+          systemInstruction: RAG_SYSTEM_INSTRUCTION,
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              sufficient_evidence: { type: Type.BOOLEAN },
+              answer: { type: Type.STRING },
+              citations: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    doc_title: { type: Type.STRING },
+                    version_label: { type: Type.STRING },
+                    page_number: { type: Type.INTEGER },
+                    quoted_span: { type: Type.STRING },
+                  },
+                  required: ['doc_title', 'version_label', 'page_number', 'quoted_span'],
                 },
-                required: ['doc_title', 'version_label', 'page_number', 'quoted_span'],
               },
             },
+            required: ['sufficient_evidence', 'answer', 'citations'],
           },
-          required: ['sufficient_evidence', 'answer', 'citations'],
         },
-      },
-    });
+      });
+
+    let response;
+    try {
+      response = await callGemini();
+    } catch (firstErr) {
+      const msg = firstErr instanceof Error ? firstErr.message : String(firstErr);
+      if (msg.includes('503') || msg.includes('UNAVAILABLE')) {
+        await new Promise((r) => setTimeout(r, 600));
+        response = await callGemini();
+      } else {
+        throw firstErr;
+      }
+    }
     const rawJson = (response.text ?? '{}').trim();
     parsed = JSON.parse(rawJson) as GroundedLlmOutput;
   }
@@ -391,11 +433,17 @@ export async function runFiveStageQuery({
       activeGroups,
       asOfIso,
       cacheKey,
+      cacheBackend,
       queryHash,
       executionMode: effectiveMode,
       startedAt,
       shortCircuited: false,
       qdrantFilterSummary,
+      vectorBackend,
+      qdrantUrl: qdrantProbe.url,
+      qdrantCollection: qdrantProbe.collection,
+      liveQdrantHits,
+      embeddingModel,
       qdrantCandidates,
       droppedReasons,
       topChildren,
@@ -432,11 +480,17 @@ export async function runFiveStageQuery({
       activeGroups,
       asOfIso,
       cacheKey,
+      cacheBackend,
       queryHash,
       executionMode: effectiveMode,
       startedAt,
       shortCircuited: false,
       qdrantFilterSummary,
+      vectorBackend,
+      qdrantUrl: qdrantProbe.url,
+      qdrantCollection: qdrantProbe.collection,
+      liveQdrantHits,
+      embeddingModel,
       qdrantCandidates,
       droppedReasons,
       topChildren,
@@ -478,10 +532,16 @@ export async function runFiveStageQuery({
       corpus_epoch: ledger.corpusEpoch,
       cache_key: cacheKey,
       cache_hit: false,
+      cache_backend: cacheBackend,
       short_circuited: false,
     },
     stage2: {
       qdrant_filter_summary: qdrantFilterSummary,
+      vector_backend: vectorBackend,
+      qdrant_url: qdrantProbe.url,
+      qdrant_collection: qdrantProbe.collection,
+      live_qdrant_hits: liveQdrantHits,
+      embedding_model: embeddingModel,
       with_payload: false,
       candidate_count: qdrantCandidates.length,
       candidates: qdrantCandidates.slice(0, 8),
@@ -537,11 +597,17 @@ function buildAbstentionResult(opts: {
   activeGroups: StageTrace['stage1']['active_groups_at_now'];
   asOfIso: string;
   cacheKey: string;
+  cacheBackend: 'live_redis' | 'embedded_memory';
   queryHash: string;
   executionMode: ExecutionMode;
   startedAt: number;
   shortCircuited: boolean;
   qdrantFilterSummary: string;
+  vectorBackend: 'live_qdrant_http' | 'embedded_vector_index';
+  qdrantUrl: string;
+  qdrantCollection: string;
+  liveQdrantHits: number;
+  embeddingModel: string;
   qdrantCandidates: StageTrace['stage2']['candidates'];
   droppedReasons: StageTrace['stage3']['dropped_reasons'];
   topChildren?: StageTrace['stage4']['reranked_children'];
@@ -580,10 +646,16 @@ function buildAbstentionResult(opts: {
         corpus_epoch: opts.ledger.corpusEpoch,
         cache_key: opts.cacheKey,
         cache_hit: false,
+        cache_backend: opts.cacheBackend,
         short_circuited: opts.shortCircuited,
       },
       stage2: {
         qdrant_filter_summary: opts.qdrantFilterSummary,
+        vector_backend: opts.vectorBackend,
+        qdrant_url: opts.qdrantUrl,
+        qdrant_collection: opts.qdrantCollection,
+        live_qdrant_hits: opts.liveQdrantHits,
+        embedding_model: opts.embeddingModel,
         with_payload: false,
         candidate_count: opts.qdrantCandidates.length,
         candidates: opts.qdrantCandidates.slice(0, 8),

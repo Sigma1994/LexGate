@@ -234,6 +234,7 @@ export default function App() {
                   snapshot={snapshot}
                   runtime={runtime}
                   onSnapshotUpdate={setSnapshot}
+                  onRefreshRuntime={refreshRuntime}
                 />
               )}
               {activeTab === 'security' && (
@@ -260,6 +261,8 @@ export default function App() {
                   snapshot={snapshot}
                   runtime={runtime}
                   onRefreshRuntime={refreshRuntime}
+                  onJumpToConsole={() => setActiveTab('console')}
+                  onJumpToLibrary={() => setActiveTab('ingestion')}
                 />
               )}
               {activeTab === 'ablation' && (

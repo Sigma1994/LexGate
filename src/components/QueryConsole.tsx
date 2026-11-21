@@ -8,6 +8,7 @@ import {
   ChevronRight,
   CornerDownLeft,
   Lock,
+  RefreshCw,
   Search,
   ShieldCheck,
   UserX,
@@ -24,6 +25,7 @@ interface QueryConsoleProps {
   snapshot: LedgerSnapshot;
   runtime: SystemRuntimeStatus | null;
   onSnapshotUpdate: (snap: LedgerSnapshot) => void;
+  onRefreshRuntime?: () => Promise<void>;
 }
 
 const PRINCIPAL_AVATARS: Record<string, string> = {
@@ -108,6 +110,7 @@ export const QueryConsole: React.FC<QueryConsoleProps> = ({
   snapshot,
   runtime,
   onSnapshotUpdate,
+  onRefreshRuntime,
 }) => {
   const defaultLocalOllama = Boolean(
     runtime?.llm_provider_setting === 'ollama' ||
@@ -118,6 +121,7 @@ export const QueryConsole: React.FC<QueryConsoleProps> = ({
   const [executionMode, setExecutionMode] = useState<ExecutionMode>(
     defaultLocalOllama ? 'airgapped_local' : 'hosted_api'
   );
+  const [userPickedMode, setUserPickedMode] = useState<boolean>(false);
   const [bypassCache, setBypassCache] = useState<boolean>(false);
   const [queryText, setQueryText] = useState<string>(PROBE_SCENARIOS[0].query);
   const [loading, setLoading] = useState<boolean>(false);
@@ -125,7 +129,18 @@ export const QueryConsole: React.FC<QueryConsoleProps> = ({
   const [response, setResponse] = useState<QueryResponse | null>(null);
   const [selectedStage, setSelectedStage] = useState<number>(3);
   const [expandedEvidence, setExpandedEvidence] = useState<boolean>(false);
+  const [showConnectionLogs, setShowConnectionLogs] = useState<boolean>(false);
+  const [refreshingRuntime, setRefreshingRuntime] = useState<boolean>(false);
   const [failedAvatars, setFailedAvatars] = useState<Record<string, boolean>>({});
+
+  React.useEffect(() => {
+    if (!userPickedMode && runtime) {
+      const preferLocal =
+        runtime.llm_provider_setting === 'ollama' ||
+        (runtime.llm_provider_setting === 'auto' && runtime.ollama.available);
+      setExecutionMode(preferLocal ? 'airgapped_local' : 'hosted_api');
+    }
+  }, [runtime, userPickedMode]);
 
   const selectedPrincipal = snapshot.principals.find((p) => p.principal_id === principalId);
   const avatarSrc = selectedPrincipal ? PRINCIPAL_AVATARS[selectedPrincipal.principal_id] : undefined;
@@ -216,7 +231,7 @@ export const QueryConsole: React.FC<QueryConsoleProps> = ({
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-4 sm:gap-8 pt-4 lg:pt-0 border-t lg:border-t-0 lg:border-l border-slate-700/70 lg:pl-8 shrink-0">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 sm:gap-6 pt-4 lg:pt-0 border-t lg:border-t-0 lg:border-l border-slate-700/70 lg:pl-7 shrink-0">
             <div>
               <div className="text-[11px] text-slate-400">Account Access</div>
               <div className={`mt-1 text-sm font-semibold ${selectedPrincipal?.is_active ? 'text-emerald-400' : 'text-rose-400'}`}>
@@ -231,18 +246,162 @@ export const QueryConsole: React.FC<QueryConsoleProps> = ({
               </div>
             </div>
             <div>
-              <div className="text-[11px] text-slate-400">AI Engine</div>
+              <div className="text-[11px] text-slate-400">Default AI Model</div>
               <div className="mt-1 text-sm font-semibold text-slate-100">
                 {executionMode === 'airgapped_local'
-                  ? `Local Ollama (${runtime?.ollama.chat_model ?? 'llama3.1:8b'})`
+                  ? `Ollama (${runtime?.ollama.chat_model ?? 'llama3.1:8b'})`
                   : runtime?.ollama.available && !runtime?.gemini_configured
-                    ? `Local Ollama (${runtime.ollama.chat_model})`
-                    : 'Cloud Gemini (Safe)'}
+                    ? `Ollama (${runtime.ollama.chat_model})`
+                    : 'Gemini (gemini-4-hydrogen)'}
+              </div>
+            </div>
+            <div>
+              <div className="text-[11px] text-slate-400">Vector &amp; Cache Stack</div>
+              <div className="mt-1 text-xs font-mono font-medium text-slate-200 leading-snug">
+                {runtime?.qdrant.reachable ? (
+                  <span className="text-emerald-300">Qdrant HTTP</span>
+                ) : (
+                  <span className="text-amber-300">Preview Vector Index</span>
+                )}
+                <span className="text-slate-500"> · </span>
+                {runtime?.redis?.reachable ? (
+                  <span className="text-emerald-300">Live Redis</span>
+                ) : (
+                  <span className="text-slate-300">Memory Cache</span>
+                )}
               </div>
             </div>
           </div>
         </div>
       </section>
+
+      {/* Connected LLMs, Vector Databases & Fallback Diagnostic Log */}
+      {runtime && (
+        <section className="saas-surface rounded-xl overflow-hidden">
+          <div className="px-5 py-3.5 flex flex-wrap items-center justify-between gap-4 bg-white">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 flex-1 min-w-0 text-xs">
+              <div className="min-w-0">
+                <div className="text-[11px] text-slate-500 font-medium">Running LLMs Connected</div>
+                <div className="mt-0.5 font-semibold text-slate-950 truncate">
+                  {runtime.ollama.available
+                    ? `Ollama (${runtime.ollama.installed_models.join(', ') || runtime.ollama.chat_model})`
+                    : `Cloud Gemini (${runtime.gemini_model})`}
+                </div>
+                <div className="text-[11px] text-slate-600 truncate font-mono">
+                  {runtime.ollama.available
+                    ? `Active at ${runtime.ollama.url}`
+                    : `Ollama fallback: ${runtime.ollama.error_reason ?? 'unreachable'}`}
+                </div>
+              </div>
+
+              <div className="min-w-0">
+                <div className="text-[11px] text-slate-500 font-medium">Vector Databases Connected</div>
+                <div className="mt-0.5 font-semibold text-slate-950 truncate">
+                  {runtime.qdrant.reachable
+                    ? `Live Qdrant (${runtime.qdrant.collections.join(', ') || runtime.qdrant.collection} · ${runtime.qdrant.live_points ?? 0} pts)`
+                    : 'Embedded Vector Index (Fallback Active)'}
+                </div>
+                <div className="text-[11px] text-slate-600 truncate font-mono">
+                  {runtime.qdrant.reachable
+                    ? `Active at ${runtime.qdrant.url}`
+                    : `Qdrant fallback: ${runtime.qdrant.error_reason ?? 'unreachable'}`}
+                </div>
+              </div>
+
+              <div className="min-w-0">
+                <div className="text-[11px] text-slate-500 font-medium">Semantic Cache Connected</div>
+                <div className="mt-0.5 font-semibold text-slate-950 truncate">
+                  {runtime.redis.reachable
+                    ? `Live Redis (${runtime.redis.live_keys ?? 0} keys)`
+                    : 'In-Memory Epoch Map (Fallback Active)'}
+                </div>
+                <div className="text-[11px] text-slate-600 truncate font-mono">
+                  {runtime.redis.reachable
+                    ? `Active at ${runtime.redis.url}`
+                    : `Redis fallback: ${runtime.redis.error_reason ?? 'unreachable'}`}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              {onRefreshRuntime && (
+                <button
+                  type="button"
+                  disabled={refreshingRuntime}
+                  onClick={async () => {
+                    setRefreshingRuntime(true);
+                    try {
+                      await onRefreshRuntime();
+                    } finally {
+                      setRefreshingRuntime(false);
+                    }
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded-md transition-colors whitespace-nowrap"
+                >
+                  <RefreshCw className={`w-3 h-3 ${refreshingRuntime ? 'animate-spin' : ''}`} />
+                  {refreshingRuntime ? 'Checking...' : 'Re-check'}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setShowConnectionLogs((prev) => !prev)}
+                className="inline-flex items-center gap-1 px-3 py-1.5 text-[11px] font-semibold text-blue-800 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-md transition-colors whitespace-nowrap"
+              >
+                {showConnectionLogs ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                {showConnectionLogs ? 'Hide Diagnostic Log' : 'Connection & Fallback Log'}
+              </button>
+            </div>
+          </div>
+
+          {showConnectionLogs && (
+            <div className="border-t border-slate-200 overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-900 text-slate-100">
+                  <tr>
+                    <th className="py-2 px-4 font-semibold">Service</th>
+                    <th className="py-2 px-4 font-semibold">Configured Endpoint</th>
+                    <th className="py-2 px-4 font-semibold">Connection State</th>
+                    <th className="py-2 px-4 font-semibold">Active Target / Models</th>
+                    <th className="py-2 px-4 font-semibold">Why Fallback Happened / Probe Log</th>
+                    <th className="py-2 px-4 font-semibold text-right">Probe Time</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-200 bg-white">
+                  {runtime.connection_logs.map((log) => (
+                    <tr key={log.service}>
+                      <td className="py-2.5 px-4 font-semibold text-slate-950 whitespace-nowrap">{log.service}</td>
+                      <td className="py-2.5 px-4 font-mono text-[11px] text-slate-700">{log.endpoint}</td>
+                      <td className="py-2.5 px-4 font-semibold whitespace-nowrap">
+                        {log.status === 'connected' ? (
+                          <span className="text-emerald-700">Connected</span>
+                        ) : log.status === 'fallback' ? (
+                          <span className="text-amber-700">Using Fallback</span>
+                        ) : (
+                          <span className="text-slate-500">Not Configured</span>
+                        )}
+                      </td>
+                      <td className="py-2.5 px-4 text-slate-800">
+                        <div className="font-medium">{log.active_target}</div>
+                        <div className="text-[11px] text-slate-500">{log.details}</div>
+                      </td>
+                      <td className="py-2.5 px-4 font-mono text-[11px] text-slate-700">
+                        {log.error_reason ? (
+                          <span className="text-rose-800">{log.error_reason}</span>
+                        ) : (
+                          <span className="text-emerald-700">Healthy connection — no fallback needed</span>
+                        )}
+                      </td>
+                      <td className="py-2.5 px-4 text-right font-mono tabular-nums text-[11px] text-slate-500 whitespace-nowrap">
+                        {log.latency_ms} ms
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         {/* Left Setup Rail */}
@@ -329,18 +488,24 @@ export const QueryConsole: React.FC<QueryConsoleProps> = ({
               <div className="grid grid-cols-2 gap-1 p-1 bg-slate-200/75 rounded-lg">
                 <button
                   type="button"
-                  onClick={() => setExecutionMode('hosted_api')}
+                  onClick={() => {
+                    setUserPickedMode(true);
+                    setExecutionMode('hosted_api');
+                  }}
                   className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-all whitespace-nowrap ${
                     executionMode === 'hosted_api'
                       ? 'bg-slate-900 text-white shadow-2xs'
                       : 'text-slate-600 hover:text-slate-950'
                   }`}
                 >
-                  Cloud AI (Safe)
+                  Cloud Gemini AI
                 </button>
                 <button
                   type="button"
-                  onClick={() => setExecutionMode('airgapped_local')}
+                  onClick={() => {
+                    setUserPickedMode(true);
+                    setExecutionMode('airgapped_local');
+                  }}
                   className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-all whitespace-nowrap ${
                     executionMode === 'airgapped_local'
                       ? 'bg-slate-900 text-white shadow-2xs'
@@ -496,7 +661,40 @@ export const QueryConsole: React.FC<QueryConsoleProps> = ({
                   </span>
                 </div>
                 <div className="text-xs text-slate-600 font-mono tabular-nums">
-                  {response.latency_ms} ms · {response.trace.stage1.cache_hit ? 'saved answer' : 'fresh search'}
+                  {response.latency_ms} ms · {response.trace.stage1.cache_hit ? 'saved answer' : 'fresh run'}
+                </div>
+              </div>
+
+              {/* Execution Provenance Strip: Shows exact AI Model, Vector DB, Embeddings, and Cache used */}
+              <div className="px-6 py-3 bg-slate-50 border-b border-slate-200/80 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-[11px]">
+                <div className="min-w-0">
+                  <div className="text-slate-500 font-medium">AI Model Used</div>
+                  <div className="font-mono font-semibold text-slate-950 truncate">
+                    {response.trace.stage5.model_used
+                      ? response.trace.stage5.model_used
+                      : 'Not called (blocked before AI)'}
+                  </div>
+                </div>
+                <div className="min-w-0">
+                  <div className="text-slate-500 font-medium">Vector Search Engine</div>
+                  <div className="font-mono font-semibold text-slate-950 truncate tabular-nums">
+                    {response.trace.stage2.vector_backend === 'live_qdrant_http'
+                      ? `Live Qdrant (${response.trace.stage2.live_qdrant_hits} hits)`
+                      : `Preview Vector Index (${response.trace.stage2.candidate_count} hits)`}
+                  </div>
+                </div>
+                <div className="min-w-0">
+                  <div className="text-slate-500 font-medium">Query Embeddings</div>
+                  <div className="font-mono font-semibold text-slate-950 truncate">
+                    {response.trace.stage2.embedding_model}
+                  </div>
+                </div>
+                <div className="min-w-0">
+                  <div className="text-slate-500 font-medium">Cache &amp; Ledger</div>
+                  <div className="font-mono font-semibold text-slate-950 truncate">
+                    {response.trace.stage1.cache_backend === 'live_redis' ? 'Live Redis' : 'Memory Cache'} ·{' '}
+                    {response.trace.stage1.cache_hit ? 'HIT' : 'MISS'}
+                  </div>
                 </div>
               </div>
 
@@ -643,10 +841,17 @@ export const QueryConsole: React.FC<QueryConsoleProps> = ({
                     {selectedStage === 2 && (
                       <div className="space-y-1 text-slate-700">
                         <div>
-                          <strong>Smart Document Search</strong> looked up matching document IDs for your clearances and chosen rule date (<span className="font-mono">{asOfDate}</span>) without exposing confidential text.
+                          <strong>Smart Document Search</strong> ran via{' '}
+                          <span className="font-mono font-semibold text-slate-950">
+                            {response.trace.stage2.vector_backend === 'live_qdrant_http'
+                              ? `Live Qdrant HTTP (${response.trace.stage2.qdrant_url} · ${response.trace.stage2.qdrant_collection})`
+                              : 'Embedded Vector Index Fallback (Qdrant container not detected on localhost:6333)'}
+                          </span>{' '}
+                          with <span className="font-mono">with_payload: false</span> and rule date{' '}
+                          <span className="font-mono">{asOfDate}</span>.
                         </div>
-                        <div className="font-mono text-[11px] text-slate-600">
-                          Matching pages found: {response.trace.stage2.candidate_count}
+                        <div className="font-mono text-[11px] text-slate-600 tabular-nums">
+                          Embedding: {response.trace.stage2.embedding_model} · Live Qdrant hits: {response.trace.stage2.live_qdrant_hits} · Combined RRF candidates: {response.trace.stage2.candidate_count}
                         </div>
                       </div>
                     )}
