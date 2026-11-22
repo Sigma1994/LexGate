@@ -2,6 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
+import multer from 'multer';
 import { createServer as createViteServer } from 'vite';
 import {
   ADRS,
@@ -10,6 +11,7 @@ import {
   GOLDEN_BENCHMARK_DISTRIBUTION,
   SMOKE_EVAL_QUESTIONS,
 } from './src/server/corpus.ts';
+import { processUploadedDocumentBuffer } from './src/server/documentProcessor.ts';
 import { RegulatoryLedger } from './src/server/ledger.ts';
 import { embedTextWithOllamaOrFallback, probeOllama } from './src/server/ollamaClient.ts';
 import {
@@ -41,6 +43,10 @@ import type {
 const PORT = 3000;
 const VALID_GROUPS: GroupId[] = ['public', 'compliance_officer', 'internal_audit'];
 const VALID_MODES: ExecutionMode[] = ['airgapped_local', 'hosted_api'];
+const uploadMiddleware = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 15 * 1024 * 1024, files: 1 },
+});
 
 async function getSystemRuntimeStatus(forceRefresh = false): Promise<SystemRuntimeStatus> {
   const [qdrant, ollama, redis] = await Promise.all([
@@ -231,6 +237,81 @@ async function startServer() {
     }
   });
 
+  const ingestAndSyncPolicy = async (params: {
+    title: string;
+    citation_code: string;
+    sensitivity: GroupId;
+    effective_from: string;
+    version_label?: string;
+    source_url?: string;
+    raw_text: string;
+    metadata?: {
+      source_filename?: string;
+      detected_format?: string;
+      pages_extracted?: number;
+      extracted_chars?: number;
+      processing_summary?: string;
+    };
+  }) => {
+    const ingested = ledger.ingestPolicyDocument({
+      title: params.title,
+      citation_code: params.citation_code,
+      sensitivity: params.sensitivity,
+      effective_from: params.effective_from,
+      version_label: params.version_label,
+      source_url: params.source_url,
+      raw_text: params.raw_text,
+    });
+
+    let syncRes = {
+      synced_live_qdrant: false,
+      embedding_source: 'Deterministic 768-dim fallback',
+    };
+    if (!ledger.indexWorkerPaused && ingested.points.length > 0) {
+      syncRes = await upsertPointsToQdrant(ingested.points);
+    }
+
+    const upload: UploadDocumentResult = {
+      doc_id: ingested.doc_id,
+      version_id: ingested.version_id,
+      title: ingested.title,
+      citation_code: ingested.citation_code,
+      sensitivity: ingested.sensitivity,
+      effective_from: ingested.effective_from,
+      parent_chunks_created: ingested.parent_chunks_created,
+      child_chunks_indexed: ingested.child_chunks_indexed,
+      quarantined_count: ingested.quarantined_count,
+      qdrant_target: syncRes.synced_live_qdrant
+        ? 'Live Qdrant HTTP + Local Index'
+        : 'Embedded Vector Index',
+      embedding_source: syncRes.embedding_source,
+      corpus_epoch: ledger.corpusEpoch,
+      ...params.metadata,
+    };
+
+    const runtime = await getSystemRuntimeStatus(true);
+    return {
+      upload,
+      snapshot: ledger.getSnapshot(),
+      runtime,
+    };
+  };
+
+  const runSingleFileMulter = (req: express.Request, res: express.Response): Promise<void> =>
+    new Promise((resolve, reject) => {
+      uploadMiddleware.single('file')(req, res, (err: unknown) => {
+        if (err) {
+          if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
+            reject(new Error('File exceeds the 15 MB upload limit.'));
+          } else {
+            reject(err instanceof Error ? err : new Error('File upload parsing failed.'));
+          }
+          return;
+        }
+        resolve();
+      });
+    });
+
   app.post('/api/admin/upload-document', async (req, res) => {
     try {
       const {
@@ -259,11 +340,11 @@ async function startServer() {
       if (typeof effective_from !== 'string' || Number.isNaN(new Date(effective_from).getTime())) {
         return res.status(400).json({ error: 'Valid effective_from date is required.' });
       }
-      if (typeof raw_text !== 'string' || raw_text.trim().length < 20 || raw_text.length > 250_000) {
-        return res.status(400).json({ error: 'Policy text must be between 20 and 250,000 characters.' });
+      if (typeof raw_text !== 'string' || raw_text.trim().length < 20 || raw_text.length > 500_000) {
+        return res.status(400).json({ error: 'Policy text must be between 20 and 500,000 characters.' });
       }
 
-      const ingested = ledger.ingestPolicyDocument({
+      const payload = await ingestAndSyncPolicy({
         title,
         citation_code,
         sensitivity,
@@ -272,40 +353,84 @@ async function startServer() {
         source_url: typeof source_url === 'string' ? source_url : undefined,
         raw_text,
       });
-
-      let syncRes = {
-        synced_live_qdrant: false,
-        embedding_source: 'Deterministic 768-dim fallback',
-      };
-      if (!ledger.indexWorkerPaused && ingested.points.length > 0) {
-        syncRes = await upsertPointsToQdrant(ingested.points);
-      }
-
-      const upload: UploadDocumentResult = {
-        doc_id: ingested.doc_id,
-        version_id: ingested.version_id,
-        title: ingested.title,
-        citation_code: ingested.citation_code,
-        sensitivity: ingested.sensitivity,
-        effective_from: ingested.effective_from,
-        parent_chunks_created: ingested.parent_chunks_created,
-        child_chunks_indexed: ingested.child_chunks_indexed,
-        quarantined_count: ingested.quarantined_count,
-        qdrant_target: syncRes.synced_live_qdrant
-          ? 'Live Qdrant HTTP + Local Index'
-          : 'Embedded Vector Index',
-        embedding_source: syncRes.embedding_source,
-        corpus_epoch: ledger.corpusEpoch,
-      };
-
-      const runtime = await getSystemRuntimeStatus(true);
-      return res.json({
-        upload,
-        snapshot: ledger.getSnapshot(),
-        runtime,
-      });
+      return res.json(payload);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Document upload failed.';
+      return res.status(400).json({ error: message });
+    }
+  });
+
+  app.post('/api/admin/preview-file', async (req, res) => {
+    try {
+      await runSingleFileMulter(req, res);
+      if (!req.file) {
+        return res.status(400).json({ error: 'Please select a file to process.' });
+      }
+      const processed = await processUploadedDocumentBuffer({
+        buffer: req.file.buffer,
+        filename: req.file.originalname,
+        mimeType: req.file.mimetype,
+      });
+      return res.json({
+        source_filename: req.file.originalname,
+        ...processed,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unable to parse uploaded file.';
+      return res.status(400).json({ error: message });
+    }
+  });
+
+  app.post('/api/admin/upload-file', async (req, res) => {
+    try {
+      await runSingleFileMulter(req, res);
+      if (!req.file) {
+        return res.status(400).json({ error: 'Please choose or drop a policy file to upload.' });
+      }
+
+      const processed = await processUploadedDocumentBuffer({
+        buffer: req.file.buffer,
+        filename: req.file.originalname,
+        mimeType: req.file.mimetype,
+      });
+
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const titleInput = typeof body.title === 'string' ? body.title.trim() : '';
+      const citationInput = typeof body.citation_code === 'string' ? body.citation_code.trim() : '';
+      const sensitivityInput = body.sensitivity as GroupId;
+      const effectiveInput = typeof body.effective_from === 'string' ? body.effective_from.trim() : '';
+      const versionInput = typeof body.version_label === 'string' ? body.version_label.trim() : '';
+
+      const title = titleInput.length >= 3 ? titleInput.slice(0, 200) : processed.suggested_title;
+      const citation_code =
+        citationInput.length >= 2 ? citationInput.slice(0, 80) : processed.suggested_citation;
+      const sensitivity: GroupId = VALID_GROUPS.includes(sensitivityInput)
+        ? sensitivityInput
+        : 'compliance_officer';
+      const effective_from =
+        effectiveInput && !Number.isNaN(new Date(effectiveInput).getTime())
+          ? effectiveInput
+          : new Date().toISOString();
+
+      const payload = await ingestAndSyncPolicy({
+        title,
+        citation_code,
+        sensitivity,
+        effective_from,
+        version_label: versionInput || undefined,
+        source_url: `upload://${path.basename(req.file.originalname)}`,
+        raw_text: processed.raw_text,
+        metadata: {
+          source_filename: req.file.originalname,
+          detected_format: processed.detected_format,
+          pages_extracted: processed.pages_extracted,
+          extracted_chars: processed.extracted_chars,
+          processing_summary: processed.processing_summary,
+        },
+      });
+      return res.json(payload);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'File upload failed.';
       return res.status(400).json({ error: message });
     }
   });

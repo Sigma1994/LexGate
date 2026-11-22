@@ -314,6 +314,11 @@ export interface UploadDocumentResult {
   qdrant_target: 'Live Qdrant HTTP + Local Index' | 'Embedded Vector Index';
   embedding_source: string;
   corpus_epoch: number;
+  source_filename?: string;
+  detected_format?: string;
+  pages_extracted?: number;
+  extracted_chars?: number;
+  processing_summary?: string;
 }
 
 export interface PipelineInspectResponse {

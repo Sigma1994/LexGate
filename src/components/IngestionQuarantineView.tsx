@@ -2,10 +2,13 @@ import React, { useMemo, useState } from 'react';
 import {
   ArrowRight,
   CheckCircle2,
+  Eye,
   FilePlus2,
+  FileText,
   Search,
   ShieldBan,
   Upload,
+  X,
 } from 'lucide-react';
 import { safeFetchJson } from '../lib/safeFetchJson.ts';
 import type {
@@ -87,6 +90,11 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
   const [tierFilter, setTierFilter] = useState<'all' | GroupId>('all');
 
   // Direct Qdrant upload state
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [isDraggingFile, setIsDraggingFile] = useState(false);
+  const [previewingFile, setPreviewingFile] = useState(false);
+  const [previewNote, setPreviewNote] = useState<string | null>(null);
+  const [showManualText, setShowManualText] = useState(false);
   const [title, setTitle] = useState('');
   const [citationCode, setCitationCode] = useState('');
   const [sensitivity, setSensitivity] = useState<GroupId>('compliance_officer');
@@ -110,18 +118,67 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
     });
   }, [snapshot.documents, searchFilter, tierFilter]);
 
-  const handleFileLoad = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const text = await file.text();
-    setRawText(text);
-    if (!title.trim()) {
-      setTitle(file.name.replace(/\.[^/.]+$/, '').replace(/[_-]+/g, ' '));
+  const formatBytes = (bytes: number): string => {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  };
+
+  const acceptChosenFile = (file: File) => {
+    setSelectedFile(file);
+    setUploadError(null);
+    setUploadResult(null);
+    setPreviewNote(null);
+    setRawText('');
+    const baseTitle = file.name.replace(/\.[^/.]+$/, '').replace(/[_-]+/g, ' ').trim();
+    if (!title.trim() && baseTitle) {
+      setTitle(baseTitle);
     }
     if (!citationCode.trim()) {
-      setCitationCode(`UPLOAD/${new Date().getFullYear()}`);
+      const slug = baseTitle
+        .replace(/[^a-zA-Z0-9]+/g, '-')
+        .replace(/^-|-$/g, '')
+        .toUpperCase()
+        .slice(0, 12);
+      setCitationCode(`DOC/${slug || 'POLICY'}/${new Date().getFullYear()}`);
     }
+  };
+
+  const handleFileLoad = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    acceptChosenFile(file);
     e.target.value = '';
+  };
+
+  const handlePreviewSelectedFile = async () => {
+    if (!selectedFile) return;
+    setPreviewingFile(true);
+    setUploadError(null);
+    try {
+      const form = new FormData();
+      form.append('file', selectedFile);
+      const { data } = await safeFetchJson<{
+        detected_format: string;
+        pages_extracted: number;
+        processing_summary: string;
+        raw_text: string;
+        suggested_title: string;
+        suggested_citation: string;
+      }>('/api/admin/preview-file', {
+        method: 'POST',
+        body: form,
+      });
+      setRawText(data.raw_text);
+      if (!title.trim()) setTitle(data.suggested_title);
+      if (!citationCode.trim()) setCitationCode(data.suggested_citation);
+      setPreviewNote(`${data.detected_format}: ${data.processing_summary}`);
+      setShowManualText(true);
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : 'Unable to preview file.');
+    } finally {
+      setPreviewingFile(false);
+    }
   };
 
   const handleUploadSubmit = async (e: React.FormEvent) => {
@@ -130,24 +187,50 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
     setUploadError(null);
     setUploadResult(null);
     try {
-      const { data } = await safeFetchJson<{
-        upload: UploadDocumentResult;
-        snapshot?: LedgerSnapshot;
-      }>('/api/admin/upload-document', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          title,
-          citation_code: citationCode,
-          sensitivity,
-          effective_from: `${effectiveFrom}T00:00:00Z`,
-          version_label: versionLabel,
-          raw_text: rawText,
-        }),
-      });
-      setUploadResult(data.upload);
-      if (data.snapshot) {
-        onSnapshotUpdate(data.snapshot);
+      if (selectedFile && rawText.trim().length === 0) {
+        const form = new FormData();
+        form.append('file', selectedFile);
+        form.append('title', title);
+        form.append('citation_code', citationCode);
+        form.append('sensitivity', sensitivity);
+        form.append('effective_from', `${effectiveFrom}T00:00:00Z`);
+        if (versionLabel.trim()) form.append('version_label', versionLabel.trim());
+
+        const { data } = await safeFetchJson<{
+          upload: UploadDocumentResult;
+          snapshot?: LedgerSnapshot;
+        }>('/api/admin/upload-file', {
+          method: 'POST',
+          body: form,
+        });
+        setUploadResult(data.upload);
+        setSelectedFile(null);
+        setPreviewNote(null);
+        if (data.snapshot) {
+          onSnapshotUpdate(data.snapshot);
+        }
+      } else {
+        const { data } = await safeFetchJson<{
+          upload: UploadDocumentResult;
+          snapshot?: LedgerSnapshot;
+        }>('/api/admin/upload-document', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title,
+            citation_code: citationCode,
+            sensitivity,
+            effective_from: `${effectiveFrom}T00:00:00Z`,
+            version_label: versionLabel,
+            raw_text: rawText,
+          }),
+        });
+        setUploadResult(data.upload);
+        setSelectedFile(null);
+        setPreviewNote(null);
+        if (data.snapshot) {
+          onSnapshotUpdate(data.snapshot);
+        }
       }
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : 'Upload failed.');
@@ -184,7 +267,7 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
               Policy Library &amp; Direct Qdrant Upload
             </h1>
             <p className="mt-1 text-sm text-slate-300 leading-relaxed">
-              Browse the full 1966–2026 banking &amp; compliance library or upload new policy documents directly into Qdrant with automatic table validation and permission tagging.
+              Browse the full 1966–2026 banking &amp; compliance library or drop in any <strong>PDF, Word (.docx), CSV/TSV, HTML, JSON, RTF, Markdown, or TXT</strong> document—LexGate converts it automatically for Qdrant and checks every table.
             </p>
           </div>
           <div className="text-xs text-right">
@@ -231,22 +314,25 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
         </div>
       </section>
 
-      {/* 2. Direct Upload Policy Document to Qdrant */}
+      {/* 2. Simple Multi-Format Upload -> Auto-Process -> Qdrant */}
       <section className="saas-surface rounded-xl overflow-hidden">
         <div className="px-6 py-4 bg-slate-900 text-white border-b border-slate-800 flex flex-wrap items-center justify-between gap-3">
           <div>
             <h2 className="text-base font-semibold flex items-center gap-2">
               <FilePlus2 className="w-4 h-4 text-blue-400" />
-              Direct Upload Policy Document to Qdrant
+              Upload Policy Document (PDF, Word .docx, CSV, HTML, TXT &amp; More)
             </h2>
             <p className="mt-0.5 text-xs text-slate-300">
-              Validates tables, creates parent/child sections, generates 768-dim embeddings, and indexes immediately into Qdrant.
+              Drop a regular document file below. LexGate extracts pages and tables, converts them into Qdrant-ready format, embeds vectors, and enables Q&amp;A immediately.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={() => {
+                setSelectedFile(null);
+                setPreviewNote(null);
+                setShowManualText(true);
                 setTitle(SAMPLE_CLEAN_POLICY.title);
                 setCitationCode(SAMPLE_CLEAN_POLICY.citation_code);
                 setSensitivity(SAMPLE_CLEAN_POLICY.sensitivity);
@@ -263,6 +349,9 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
             <button
               type="button"
               onClick={() => {
+                setSelectedFile(null);
+                setPreviewNote(null);
+                setShowManualText(true);
                 setTitle(SAMPLE_BROKEN_TABLE_POLICY.title);
                 setCitationCode(SAMPLE_BROKEN_TABLE_POLICY.citation_code);
                 setSensitivity(SAMPLE_BROKEN_TABLE_POLICY.sensitivity);
@@ -279,7 +368,95 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
           </div>
         </div>
 
-        <form onSubmit={handleUploadSubmit} className="p-6 space-y-4">
+        <form onSubmit={handleUploadSubmit} className="p-6 space-y-5">
+          {/* Step 1: Dropzone */}
+          <div
+            onDragOver={(e) => {
+              e.preventDefault();
+              setIsDraggingFile(true);
+            }}
+            onDragLeave={() => setIsDraggingFile(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setIsDraggingFile(false);
+              const dropped = e.dataTransfer.files?.[0];
+              if (dropped) acceptChosenFile(dropped);
+            }}
+            className={`rounded-xl border-2 border-dashed p-5 transition-colors ${
+              isDraggingFile
+                ? 'border-blue-600 bg-blue-50/70'
+                : selectedFile
+                  ? 'border-emerald-400 bg-emerald-50/40'
+                  : 'border-slate-300 bg-slate-50/80 hover:border-blue-400'
+            }`}
+          >
+            {selectedFile ? (
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-10 h-10 rounded-lg bg-emerald-100 text-emerald-800 flex items-center justify-center shrink-0">
+                    <FileText className="w-5 h-5" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-xs sm:text-sm font-semibold text-slate-950 truncate">
+                      {selectedFile.name}
+                    </div>
+                    <div className="text-[11px] text-slate-600 font-mono">
+                      {formatBytes(selectedFile.size)} · Ready for automatic extraction &amp; Qdrant indexing
+                    </div>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={previewingFile}
+                    onClick={() => void handlePreviewSelectedFile()}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-800 bg-white border border-slate-300 hover:bg-slate-100 rounded-md transition-colors disabled:opacity-50"
+                  >
+                    <Eye className="w-3.5 h-3.5" />
+                    {previewingFile ? 'Converting...' : 'Preview Extracted Text'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedFile(null);
+                      setPreviewNote(null);
+                    }}
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:text-rose-700 bg-white border border-slate-300 rounded-md transition-colors"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                    Clear
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <label className="flex flex-col sm:flex-row items-center justify-between gap-4 cursor-pointer">
+                <div className="flex items-center gap-3.5 text-center sm:text-left">
+                  <div className="w-11 h-11 rounded-lg bg-blue-100 text-blue-700 flex items-center justify-center shrink-0">
+                    <Upload className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="text-xs sm:text-sm font-semibold text-slate-950">
+                      Drag &amp; drop your policy file here, or click to browse
+                    </div>
+                    <div className="mt-0.5 text-[11px] text-slate-600">
+                      Accepts <strong>.pdf</strong>, <strong>.docx</strong> (Word), <strong>.csv</strong> / <strong>.tsv</strong>, <strong>.html</strong>, <strong>.json</strong>, <strong>.rtf</strong>, <strong>.md</strong>, and <strong>.txt</strong> (max 15 MB) — no manual formatting needed.
+                    </div>
+                  </div>
+                </div>
+                <span className="px-4 py-2 text-xs font-semibold text-blue-800 bg-white border border-blue-300 rounded-lg hover:bg-blue-50 transition-colors whitespace-nowrap shrink-0">
+                  Choose File
+                </span>
+                <input
+                  type="file"
+                  accept=".pdf,.docx,.txt,.md,.markdown,.csv,.tsv,.html,.htm,.json,.rtf"
+                  onChange={handleFileLoad}
+                  className="hidden"
+                />
+              </label>
+            )}
+          </div>
+
+          {/* Step 2: Simple Document Details */}
           <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
             <div className="md:col-span-5 space-y-1">
               <label htmlFor="upload-title" className="block text-xs font-semibold text-slate-800">
@@ -291,14 +468,14 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
                 required
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
-                placeholder="e.g., CBK Green Finance Risk Directive (2026)"
+                placeholder="Auto-filled from file name (or type a custom title)"
                 className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-lg text-slate-950 focus:bg-white focus:outline-none focus:border-blue-700"
               />
             </div>
 
             <div className="md:col-span-3 space-y-1">
               <label htmlFor="upload-citation" className="block text-xs font-semibold text-slate-800">
-                Citation / Circular Code
+                Citation / Reference Code
               </label>
               <input
                 id="upload-citation"
@@ -313,7 +490,7 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
 
             <div className="md:col-span-2 space-y-1">
               <label htmlFor="upload-sensitivity" className="block text-xs font-semibold text-slate-800">
-                Access Level
+                Who Can Read It
               </label>
               <select
                 id="upload-sensitivity"
@@ -342,44 +519,53 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
             </div>
           </div>
 
-          <div className="space-y-1.5">
+          {/* Optional Paste / Preview Area */}
+          <div className="space-y-2">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <label htmlFor="upload-text" className="block text-xs font-semibold text-slate-800">
-                Policy Content (Separate sections with a blank line; Markdown tables supported)
-              </label>
-              <label className="inline-flex items-center gap-1.5 px-3 py-1 text-[11px] font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-md cursor-pointer transition-colors">
-                <Upload className="w-3 h-3" />
-                <span>Import .txt / .md / .csv File</span>
-                <input
-                  type="file"
-                  accept=".txt,.md,.csv,.markdown"
-                  onChange={(e) => void handleFileLoad(e)}
-                  className="hidden"
-                />
-              </label>
+              <button
+                type="button"
+                onClick={() => setShowManualText((prev) => !prev)}
+                className="text-xs font-medium text-blue-700 hover:text-blue-900 underline underline-offset-2"
+              >
+                {showManualText
+                  ? 'Hide text editor'
+                  : 'Or paste / review extracted text manually (optional)'}
+              </button>
+              {previewNote && (
+                <span className="text-[11px] font-mono text-emerald-800 bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 rounded">
+                  {previewNote}
+                </span>
+              )}
             </div>
-            <textarea
-              id="upload-text"
-              rows={5}
-              required
-              value={rawText}
-              onChange={(e) => setRawText(e.target.value)}
-              placeholder="Paste regulatory text or Markdown tables here, or import a .txt / .md file..."
-              className="w-full px-3.5 py-2.5 text-xs font-mono bg-slate-50 border border-slate-300 rounded-lg text-slate-950 focus:bg-white focus:outline-none focus:border-blue-700"
-            />
+
+            {showManualText && (
+              <textarea
+                id="upload-text"
+                rows={5}
+                value={rawText}
+                onChange={(e) => setRawText(e.target.value)}
+                placeholder="Optional: paste policy text here if you are not uploading a file, or inspect/edit converted text..."
+                className="w-full px-3.5 py-2.5 text-xs font-mono bg-slate-50 border border-slate-300 rounded-lg text-slate-950 focus:bg-white focus:outline-none focus:border-blue-700"
+              />
+            )}
           </div>
 
-          <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex flex-wrap items-center justify-between gap-4 pt-1">
             <span className="text-[11px] text-slate-500">
-              Any table with mismatched column counts is automatically caught and placed in Safety Hold below.
+              Tables are automatically aligned and validated; broken or incomplete tables are safely held in Safety Hold below.
             </span>
             <button
               type="submit"
-              disabled={uploading || !title.trim() || !citationCode.trim() || rawText.trim().length < 20}
-              className="inline-flex items-center gap-2 px-5 py-2 text-xs font-semibold text-white bg-blue-700 hover:bg-blue-800 disabled:opacity-50 rounded-lg transition-colors whitespace-nowrap"
+              disabled={
+                uploading ||
+                !title.trim() ||
+                !citationCode.trim() ||
+                (!selectedFile && rawText.trim().length < 20)
+              }
+              className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-semibold text-white bg-blue-700 hover:bg-blue-800 disabled:opacity-50 rounded-lg transition-colors whitespace-nowrap shadow-xs"
             >
               <Upload className="w-3.5 h-3.5" />
-              {uploading ? 'Indexing Into Qdrant...' : 'Index Policy Into Qdrant'}
+              {uploading ? 'Processing & Indexing Into Qdrant...' : 'Process & Index Into Qdrant'}
             </button>
           </div>
 
@@ -395,7 +581,13 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
                 <div className="font-semibold inline-flex items-center gap-1.5">
                   <CheckCircle2 className="w-4 h-4 text-emerald-700" />
                   Indexed “{uploadResult.title}” ({uploadResult.citation_code})
+                  {uploadResult.detected_format ? ` · ${uploadResult.detected_format}` : ''}
                 </div>
+                {uploadResult.processing_summary && (
+                  <div className="text-[11px] text-emerald-900">
+                    {uploadResult.processing_summary}
+                  </div>
+                )}
                 <div className="text-[11px] text-emerald-900 font-mono tabular-nums">
                   {uploadResult.parent_chunks_created} parent section(s) · {uploadResult.child_chunks_indexed} Qdrant vector point(s) · {uploadResult.quarantined_count} Safety Hold block(s) · Target: {uploadResult.qdrant_target} · Embeddings: {uploadResult.embedding_source}
                 </div>

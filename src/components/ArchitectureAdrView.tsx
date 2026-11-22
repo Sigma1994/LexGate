@@ -1,5 +1,12 @@
 import React, { useState } from 'react';
-import { ArrowRight, Check, ChevronDown, ChevronRight, Copy, Landmark } from 'lucide-react';
+import {
+  ArrowRight,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Copy,
+  Landmark,
+} from 'lucide-react';
 
 interface ArchitectureAdrViewProps {
   ddlSnippet: string;
@@ -95,15 +102,180 @@ const CORE_PROTECTIONS = [
   },
 ];
 
+interface LocalDevStep {
+  id: string;
+  step: string;
+  title: string;
+  summary: string;
+  bullets?: string[];
+  code?: string;
+  note?: string;
+}
+
+const LOCAL_DEV_STEPS: LocalDevStep[] = [
+  {
+    id: 'step-1',
+    step: 'Step 1',
+    title: 'Install Required Tools on Windows 10',
+    summary: 'Install these four tools before opening the project in PyCharm:',
+    bullets: [
+      'Docker Desktop for Windows (keep "Use WSL 2 instead of Hyper-V" checked; launch Docker Desktop and wait for "Engine running").',
+      'Node.js v20 LTS or v22 LTS from nodejs.org (keep "Add to PATH" checked).',
+      'Git for Windows from git-scm.com.',
+      'Python 3.10–3.12 from python.org with "Add python.exe to PATH" checked (optional; only needed for local PDF ingestion in Step 9).',
+    ],
+  },
+  {
+    id: 'step-2a',
+    step: 'Step 2A',
+    title: 'Configure Git on Windows 10 (First Time Only)',
+    summary: 'Open PowerShell or PyCharm Terminal (Alt + F12) and set your Git identity and Windows line endings:',
+    code: `git --version
+git config --global user.name "Your Name"
+git config --global user.email "your-email@example.com"
+git config --global core.autocrlf true`,
+    note: 'Setting core.autocrlf true prevents false line-ending diffs between Windows (CRLF) and Linux containers (LF).',
+  },
+  {
+    id: 'step-2b',
+    step: 'Step 2B',
+    title: 'Clone From Your Git Repository (First Time)',
+    summary:
+      'In PyCharm: File -> New -> Project from Version Control (or "Get from VCS" on the Welcome screen), choose Git, paste your repository URL, set Directory (e.g. C:\\Projects\\lexgate), and click Clone. Use GitHub OAuth or a Personal Access Token (PAT) if private. Or clone from terminal:',
+    code: `mkdir C:\\Projects -Force
+cd C:\\Projects
+git clone https://github.com/<your-username>/<your-repo>.git lexgate
+cd lexgate
+git remote -v
+git branch -a`,
+    note: 'After cloning via terminal, open C:\\Projects\\lexgate in PyCharm via File -> Open... PyCharm Windows PowerShell 5.1 does not support "&&" chaining—run commands one line at a time.',
+  },
+  {
+    id: 'step-2c',
+    step: 'Step 2C',
+    title: 'Pull Latest Updates From Git (Existing Clone)',
+    summary:
+      'In PyCharm press Ctrl + T (Git -> Pull...) or run the commands below in PyCharm Terminal (Alt + F12). If you have local uncommitted edits, stash them first:',
+    code: `git status
+git fetch origin
+git pull origin main`,
+    note: '.gitignore ignores .env* (while keeping .env.example tracked) and node_modules/, so git pull will never overwrite your local .env. Re-run npm install whenever package.json changes.',
+  },
+  {
+    id: 'step-3',
+    step: 'Step 3',
+    title: 'Create & Verify the .env File',
+    summary:
+      'Copy .env.example to .env (PowerShell: Copy-Item .env.example .env | CMD: copy .env.example .env) and confirm these settings—leaving QDRANT_API_KEY empty for local Docker Qdrant:',
+    code: `LLM_PROVIDER=auto
+OLLAMA_URL=http://localhost:11434
+OLLAMA_MODEL=llama3.1:8b
+OLLAMA_EMBED_MODEL=nomic-embed-text
+QDRANT_URL=http://localhost:6333
+QDRANT_COLLECTION=lexgate_policies
+QDRANT_API_KEY=
+REDIS_URL=redis://localhost:6379
+REDIS_TTL_SECONDS=3600
+GEMINI_API_KEY=MY_GEMINI_API_KEY`,
+    note: 'LLM_PROVIDER=auto uses local Ollama (llama3.1:8b) automatically whenever http://localhost:11434 is reachable (0 outbound bytes). GEMINI_API_KEY is optional locally.',
+  },
+  {
+    id: 'step-4',
+    step: 'Step 4',
+    title: 'Start Qdrant, PostgreSQL 17, Redis & Ollama via Docker',
+    summary:
+      'Ensure Docker Desktop is running, then start all four services in docker-compose.yml (Qdrant on 6333/6334, PostgreSQL 17 on 5432, Redis on 6379, Ollama on 11434):',
+    code: `docker compose up -d
+docker compose ps`,
+    note: 'If the native Windows Ollama tray app is already running on port 11434, Quit it from the system tray so lexgate_ollama can bind cleanly (or keep it and pull models directly in Windows Ollama).',
+  },
+  {
+    id: 'step-5',
+    step: 'Step 5',
+    title: 'Pull Default Ollama LLM & Embedding Models',
+    summary:
+      'Download llama3.1:8b (~4.9 GB chat/synthesis) and nomic-embed-text (~274 MB 768-dim embeddings) into the lexgate_ollama container (run one line at a time in Windows PowerShell):',
+    code: `docker exec lexgate_ollama ollama pull llama3.1:8b
+docker exec lexgate_ollama ollama pull nomic-embed-text
+docker exec lexgate_ollama ollama list`,
+  },
+  {
+    id: 'step-6',
+    step: 'Step 6',
+    title: 'Verify Local Services Are Reachable on Windows',
+    summary: 'Confirm Qdrant, Ollama, and Redis respond locally before launching Node:',
+    code: `Invoke-RestMethod http://localhost:6333/collections
+Invoke-RestMethod http://localhost:11434/api/tags
+docker exec lexgate_redis redis-cli ping`,
+  },
+  {
+    id: 'step-7',
+    step: 'Step 7',
+    title: 'Install Node Dependencies & Start the App',
+    summary:
+      'Install packages and launch the Express + Vite server on port 3000 (you can also save npm run dev as a PyCharm Run Configuration):',
+    code: `npm install
+npm run dev`,
+    note: 'Wait for "LexGate server listening on http://0.0.0.0:3000", then open http://localhost:3000 in your browser.',
+  },
+  {
+    id: 'step-8',
+    step: 'Step 8',
+    title: 'Verify Connections in the Web UI',
+    summary: 'Confirm live wiring inside LexGate once http://localhost:3000 loads:',
+    bullets: [
+      'Open "Ask Questions" and inspect "Connected LLMs, Vector Databases & Fallback Diagnostic Log": Ollama LLM, Qdrant Vector DB, and Redis Cache should all read Connected.',
+      'Run a question and check the "Tools Used" strip: it should show ollama/llama3.1:8b, Live Qdrant HTTP (lexgate_policies), and Ollama nomic-embed-text (768d).',
+      'Run the exact same question again: Stage 1 should report HIT (Live Redis).',
+      'Visit http://localhost:6333/dashboard to inspect the lexgate_policies vector collection in Qdrant.',
+    ],
+  },
+  {
+    id: 'step-9',
+    step: 'Step 9',
+    title: 'Optional: PyCharm Python Interpreter & Batch PDF Ingestion',
+    summary:
+      'Create a .venv interpreter in PyCharm (Settings -> Project -> Python Interpreter -> Add Local Interpreter -> Virtualenv), put .pdf files in ./pdfs, keep npm run dev running, and ingest via PyMuPDF or Unstructured:',
+    code: `.venv\\Scripts\\Activate.ps1
+pip install -r scripts/requirements-ingest.txt
+python scripts/ingest_pdfs.py --dir ./pdfs --parser pymupdf --sensitivity compliance_officer --effective-from 2026-01-01`,
+    note: 'To embed purely on CPU using sentence-transformers/all-MiniLM-L6-v2 (384 dims) directly into Qdrant: append --mode direct-qdrant --collection lexgate_minilm_384.',
+  },
+  {
+    id: 'step-10',
+    step: 'Step 10',
+    title: 'Stopping, Restarting & Windows 10 Troubleshooting',
+    summary: 'Daily workflow and quick fixes for common Windows 10 issues:',
+    code: `docker compose stop
+docker compose start`,
+    bullets: [
+      'Stop Node with Ctrl + C; docker compose stop preserves pulled Ollama models and Qdrant volumes.',
+      'Port conflict check on Windows: run netstat -ano | findstr :11434 (or :6333, :6379, :5432, :3000) to locate conflicting local services.',
+      'If PowerShell blocks .venv activation: run Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned once.',
+      'On CPU-only laptops under 16 GB RAM, switch OLLAMA_MODEL=llama3.2:3b in .env and pull llama3.2:3b for faster responses.',
+    ],
+  },
+];
+
 export const ArchitectureAdrView: React.FC<ArchitectureAdrViewProps> = ({ ddlSnippet }) => {
   const [copied, setCopied] = useState(false);
+  const [copiedStepId, setCopiedStepId] = useState<string | null>(null);
   const [showSql, setShowSql] = useState(false);
+  const [showLocalSetup, setShowLocalSetup] = useState(false);
   const [imgError, setImgError] = useState(false);
 
   const handleCopy = async () => {
     await navigator.clipboard.writeText(ddlSnippet);
     setCopied(true);
     setTimeout(() => setCopied(false), 1800);
+  };
+
+  const handleCopyStep = async (stepId: string, text: string) => {
+    await navigator.clipboard.writeText(text);
+    setCopiedStepId(stepId);
+    setTimeout(() => {
+      setCopiedStepId((prev) => (prev === stepId ? null : prev));
+    }, 1800);
   };
 
   return (
@@ -296,33 +468,116 @@ export const ArchitectureAdrView: React.FC<ArchitectureAdrViewProps> = ({ ddlSni
         </div>
       </section>
 
-      {/* Optional Engineer Reference */}
-      <section className="saas-surface rounded-xl p-6 space-y-3">
-        <div className="flex items-center justify-between gap-4">
-          <button
-            type="button"
-            onClick={() => setShowSql((prev) => !prev)}
-            className="inline-flex items-center gap-2 text-sm font-semibold text-slate-950 hover:text-blue-700 transition-colors"
-          >
-            {showSql ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-            For Engineers: Technical Reference (Database Schema &amp; Security Policy)
-          </button>
-          {showSql && (
+      {/* Optional Engineer Reference & Local Setup Guide */}
+      <section className="saas-surface rounded-xl p-6 space-y-4">
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-4">
             <button
               type="button"
-              onClick={() => void handleCopy()}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap"
+              aria-expanded={showSql}
+              onClick={() => setShowSql((prev) => !prev)}
+              className="inline-flex items-center gap-2 text-sm font-semibold text-slate-950 hover:text-blue-700 transition-colors text-left"
             >
-              {copied ? <Check className="w-3.5 h-3.5 text-emerald-700" /> : <Copy className="w-3.5 h-3.5" />}
-              {copied ? 'Copied' : 'Copy SQL'}
+              {showSql ? <ChevronDown className="w-4 h-4 shrink-0" /> : <ChevronRight className="w-4 h-4 shrink-0" />}
+              For Engineers: Technical Reference (Database Schema &amp; Security Policy)
             </button>
+            {showSql && (
+              <button
+                type="button"
+                onClick={() => void handleCopy()}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
+              >
+                {copied ? <Check className="w-3.5 h-3.5 text-emerald-700" /> : <Copy className="w-3.5 h-3.5" />}
+                {copied ? 'Copied' : 'Copy SQL'}
+              </button>
+            )}
+          </div>
+          {showSql && (
+            <pre className="p-4 bg-[#091120] text-slate-100 rounded-lg text-xs font-mono overflow-x-auto leading-relaxed">
+              {ddlSnippet}
+            </pre>
           )}
         </div>
-        {showSql && (
-          <pre className="p-4 bg-[#091120] text-slate-100 rounded-lg text-xs font-mono overflow-x-auto leading-relaxed">
-            {ddlSnippet}
-          </pre>
-        )}
+
+        <div className="pt-4 border-t border-slate-200/90 space-y-3">
+          <button
+            type="button"
+            aria-expanded={showLocalSetup}
+            onClick={() => setShowLocalSetup((prev) => !prev)}
+            className="inline-flex items-center gap-2 text-sm font-semibold text-slate-950 hover:text-blue-700 transition-colors text-left"
+          >
+            {showLocalSetup ? (
+              <ChevronDown className="w-4 h-4 shrink-0" />
+            ) : (
+              <ChevronRight className="w-4 h-4 shrink-0" />
+            )}
+            For Engineers: Full Local Development Guide (Git, PyCharm on Windows 10, Docker, Ollama &amp; Qdrant)
+          </button>
+
+          {showLocalSetup && (
+            <div className="pt-2 space-y-3">
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Complete start-to-finish instructions for cloning or pulling from Git in <strong>PyCharm on Windows 10</strong> and running LexGate locally with <strong>Docker (Qdrant, PostgreSQL 17, Redis, Ollama)</strong> and optional <strong>Python PDF ingestion</strong>.
+              </p>
+
+              <div className="space-y-3">
+                {LOCAL_DEV_STEPS.map((item) => (
+                  <div
+                    key={item.id}
+                    className="p-4 rounded-lg border border-slate-200 bg-slate-50/90 space-y-2.5"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[11px] font-mono font-semibold text-blue-700 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded">
+                          {item.step}
+                        </span>
+                        <h3 className="text-xs sm:text-sm font-semibold text-slate-950">
+                          {item.title}
+                        </h3>
+                      </div>
+                      {item.code && (
+                        <button
+                          type="button"
+                          onClick={() => void handleCopyStep(item.id, item.code!)}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-100 rounded-md transition-colors whitespace-nowrap"
+                        >
+                          {copiedStepId === item.id ? (
+                            <Check className="w-3 h-3 text-emerald-700" />
+                          ) : (
+                            <Copy className="w-3 h-3" />
+                          )}
+                          {copiedStepId === item.id ? 'Copied' : 'Copy'}
+                        </button>
+                      )}
+                    </div>
+
+                    <p className="text-xs text-slate-700 leading-relaxed">{item.summary}</p>
+
+                    {item.bullets && item.bullets.length > 0 && (
+                      <ul className="list-disc pl-5 space-y-1 text-xs text-slate-700 leading-relaxed">
+                        {item.bullets.map((b) => (
+                          <li key={b}>{b}</li>
+                        ))}
+                      </ul>
+                    )}
+
+                    {item.code && (
+                      <pre className="p-3.5 bg-[#091120] text-slate-100 rounded-lg text-[11px] sm:text-xs font-mono overflow-x-auto leading-relaxed">
+                        {item.code}
+                      </pre>
+                    )}
+
+                    {item.note && (
+                      <p className="text-[11px] text-slate-600 leading-relaxed border-t border-slate-200/70 pt-2">
+                        <strong className="text-slate-800">Note:</strong> {item.note}
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
       </section>
     </div>
   );
