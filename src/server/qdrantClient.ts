@@ -276,6 +276,45 @@ export async function syncAclPayloadInQdrant(
   }
 }
 
+export async function deletePointsFromQdrant(pointIds: string[]): Promise<boolean> {
+  if (pointIds.length === 0) return true;
+  const probe = await probeQdrant();
+  if (!probe.reachable) return false;
+  const { url, collection, apiKey } = getQdrantConfig();
+  try {
+    const res = await fetch(
+      `${url}/collections/${encodeURIComponent(collection)}/points/delete?wait=true`,
+      {
+        method: 'POST',
+        headers: qdrantHeaders(apiKey),
+        body: JSON.stringify({ points: pointIds }),
+        signal: AbortSignal.timeout(3000),
+      }
+    );
+    cachedQdrantProbe = null;
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function clearQdrantCollectionPoints(): Promise<boolean> {
+  const probe = await probeQdrant();
+  if (!probe.reachable) return false;
+  const { url, collection, apiKey } = getQdrantConfig();
+  try {
+    const res = await fetch(`${url}/collections/${encodeURIComponent(collection)}`, {
+      method: 'DELETE',
+      headers: qdrantHeaders(apiKey),
+      signal: AbortSignal.timeout(3000),
+    });
+    cachedQdrantProbe = null;
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function searchQdrantLive(
   query: string,
   allowedGroups: GroupId[],

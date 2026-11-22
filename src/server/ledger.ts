@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { STOPWORDS, chunkDocumentPages, tokenize, type PageInput } from './chunker.ts';
 import {
   MAX_EPOCH_SENTINEL_TS,
   SEED_ACL_GRANTS,
@@ -11,6 +12,7 @@ import {
 } from './corpus.ts';
 import type {
   DocumentChunk,
+  DocumentFirstPagePreview,
   DocumentVersion,
   GroupId,
   GroupMembership,
@@ -44,20 +46,6 @@ const SYNONYM_CLUSTERS: string[][] = [
   ['ifrs 9', 'ecl', 'expected credit loss', 'dpd', 'days past due', 'npl', 'stage 1', 'stage 2', 'stage 3', 'coverage'],
 ];
 
-const STOPWORDS = new Set([
-  'the', 'and', 'for', 'with', 'that', 'this', 'from', 'are', 'was', 'were', 'have', 'has',
-  'will', 'shall', 'must', 'into', 'upon', 'under', 'only', 'any', 'all', 'not', 'but', 'per',
-  'than', 'such', 'when', 'where', 'which', 'what', 'within', 'their', 'they', 'been',
-]);
-
-function tokenize(text: string): string[] {
-  return text
-    .toLowerCase()
-    .replace(/[^a-z0-9.%/-]+/g, ' ')
-    .split(/\s+/)
-    .filter((t) => t.length > 1);
-}
-
 function expandTerms(text: string): Set<string> {
   const tokens = tokenize(text);
   const tokenSet = new Set(tokens);
@@ -78,48 +66,6 @@ function expandTerms(text: string): Set<string> {
   return expanded;
 }
 
-function extractKeywords(text: string, citationCode: string): string[] {
-  const tokens = tokenize(`${citationCode} ${text}`);
-  const freq = new Map<string, number>();
-  for (const tok of tokens) {
-    if (STOPWORDS.has(tok) || tok.length < 2) continue;
-    freq.set(tok, (freq.get(tok) ?? 0) + 1);
-  }
-  return Array.from(freq.entries())
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .slice(0, 14)
-    .map(([k]) => k);
-}
-
-function splitMarkdownTablePipeCount(line: string): number {
-  const trimmed = line.trim().replace(/^\|/, '').replace(/\|$/, '');
-  return trimmed.split('|').length;
-}
-
-function detectJaggedTable(block: string): {
-  jagged: boolean;
-  expectedColumns: number;
-  observedLengths: number[];
-  badRowIndex: number;
-} {
-  const lines = block
-    .split('\n')
-    .map((l) => l.trim())
-    .filter((l) => l.startsWith('|'));
-  if (lines.length < 2) {
-    return { jagged: false, expectedColumns: 0, observedLengths: [], badRowIndex: -1 };
-  }
-  const counts = lines.map(splitMarkdownTablePipeCount);
-  const expected = counts[0];
-  const badIdx = counts.findIndex((c) => c !== expected);
-  return {
-    jagged: badIdx !== -1,
-    expectedColumns: expected,
-    observedLengths: counts,
-    badRowIndex: badIdx,
-  };
-}
-
 export class RegulatoryLedger {
   public principals: Principal[] = [];
   public memberships: GroupMembership[] = [];
@@ -136,23 +82,24 @@ export class RegulatoryLedger {
   public indexWorkerPaused = false;
   private nextOutboxId = 1;
 
-  constructor() {
-    this.reset();
+  constructor(options?: { empty?: boolean }) {
+    this.reset(options);
   }
 
-  public reset(): void {
+  public reset(options?: { empty?: boolean }): void {
+    const empty = Boolean(options?.empty);
     this.principals = structuredClone(SEED_PRINCIPALS);
     this.memberships = structuredClone(SEED_MEMBERSHIPS);
-    this.documents = structuredClone(SEED_DOCUMENTS);
-    this.versions = structuredClone(SEED_VERSIONS);
-    this.aclGrants = structuredClone(SEED_ACL_GRANTS);
-    this.chunks = structuredClone(SEED_CHUNKS);
-    this.quarantine = structuredClone(SEED_QUARANTINE);
+    this.documents = empty ? [] : structuredClone(SEED_DOCUMENTS);
+    this.versions = empty ? [] : structuredClone(SEED_VERSIONS);
+    this.aclGrants = empty ? [] : structuredClone(SEED_ACL_GRANTS);
+    this.chunks = empty ? [] : structuredClone(SEED_CHUNKS);
+    this.quarantine = empty ? [] : structuredClone(SEED_QUARANTINE);
     this.outbox = [];
     this.qdrantPoints = new Map();
     this.queryLog = [];
     this.semanticCache = new Map();
-    this.corpusEpoch = 1;
+    this.corpusEpoch = empty ? this.corpusEpoch + 1 : 1;
     this.indexWorkerPaused = false;
     this.nextOutboxId = 1;
 
@@ -164,6 +111,34 @@ export class RegulatoryLedger {
         this.qdrantPoints.set(chunk.chunk_id, point);
       }
     }
+  }
+
+  public deleteDocument(docId: string): { deleted: boolean; deletedChunkIds: string[] } {
+    const docIdx = this.documents.findIndex((d) => d.doc_id === docId);
+    if (docIdx === -1) {
+      return { deleted: false, deletedChunkIds: [] };
+    }
+    this.documents.splice(docIdx, 1);
+
+    const versionIds = new Set(
+      this.versions.filter((v) => v.doc_id === docId).map((v) => v.version_id)
+    );
+    this.versions = this.versions.filter((v) => v.doc_id !== docId);
+    this.aclGrants = this.aclGrants.filter((g) => g.doc_id !== docId);
+
+    const deletedChunkIds = this.chunks
+      .filter((c) => versionIds.has(c.version_id) && c.chunk_tier === 'child')
+      .map((c) => c.chunk_id);
+
+    this.chunks = this.chunks.filter((c) => !versionIds.has(c.version_id));
+    this.quarantine = this.quarantine.filter((q) => q.doc_id !== docId);
+    this.outbox = this.outbox.filter((o) => o.doc_id !== docId);
+    for (const cid of deletedChunkIds) {
+      this.qdrantPoints.delete(cid);
+    }
+    this.semanticCache.clear();
+    this.corpusEpoch += 1;
+    return { deleted: true, deletedChunkIds };
   }
 
   public clone(): RegulatoryLedger {
@@ -310,6 +285,7 @@ export class RegulatoryLedger {
     version_label?: string;
     source_url?: string;
     raw_text: string;
+    pages?: PageInput[];
   }): {
     doc_id: string;
     version_id: string;
@@ -370,110 +346,70 @@ export class RegulatoryLedger {
       throw new Error(verAdd.error ?? 'Failed to add document version.');
     }
 
-    const rawSections = input.raw_text
-      .split(/\n{2,}/)
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0);
-    const sections = rawSections.length > 0 ? rawSections : [input.raw_text.trim()];
+    let pagesToChunk: PageInput[];
+    if (input.pages && input.pages.length > 0) {
+      pagesToChunk = input.pages
+        .map((p, idx) => ({
+          page_number: Number.isFinite(p.page_number) && p.page_number > 0 ? Math.floor(p.page_number) : idx + 1,
+          text: String(p.text ?? '').trim(),
+        }))
+        .filter((p) => p.text.length > 0);
+    } else {
+      const rawSections = input.raw_text
+        .split(/\n{2,}/)
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+      const fallbackSections = rawSections.length > 0 ? rawSections : [input.raw_text.trim()];
+      pagesToChunk = fallbackSections.map((text, idx) => ({
+        page_number: idx + 1,
+        text,
+      }));
+    }
 
-    let parentCount = 0;
+    const chunked = chunkDocumentPages({
+      doc_id: docId,
+      doc_title: doc.title,
+      version_id: versionId,
+      citation_code: doc.citation_code,
+      pages: pagesToChunk,
+      run_id: runId,
+      now_iso: nowIso,
+      ocr_confidence: 0.99,
+    });
+
+    for (const qRec of chunked.quarantined) {
+      this.quarantine.push(qRec);
+    }
+    for (const parentChunk of chunked.parentChunks) {
+      this.addChunk(parentChunk);
+    }
+
     let childCount = 0;
-    let quarantinedCount = 0;
     const createdPoints: QdrantPoint[] = [];
     const payloadHash = this.computePayloadHash(docId, version);
 
-    sections.forEach((sec, idx) => {
-      const pageNum = idx + 1;
-      const jaggedCheck = detectJaggedTable(sec);
-      if (jaggedCheck.jagged) {
-        this.quarantine.push({
-          quarantine_id: crypto.randomUUID(),
-          run_id: runId,
+    for (const childChunk of chunked.childChunks) {
+      const added = this.addChunk(childChunk);
+      if (added.ok) {
+        childCount += 1;
+        this.outbox.push({
+          outbox_id: this.nextOutboxId++,
+          chunk_id: childChunk.chunk_id,
           doc_id: docId,
-          doc_title: doc.title,
-          page_number: pageNum,
-          reason_code: 'JAGGED_TABLE_COLUMNS',
-          ocr_confidence: 0.88,
-          raw_payload: {
-            expected_columns: jaggedCheck.expectedColumns,
-            observed_row_lengths: jaggedCheck.observedLengths,
-            row_index: jaggedCheck.badRowIndex,
-            snippet: sec.slice(0, 260),
-            action_taken: 'Quarantined during direct upload without auto-padding',
-          },
+          op_type: 'upsert',
+          payload_hash: payloadHash,
           created_at: nowIso,
+          processed_at: this.indexWorkerPaused ? null : nowIso,
         });
-        quarantinedCount += 1;
-        return;
-      }
-
-      const isTable = sec.split('\n').some((l) => l.trim().startsWith('|'));
-      const parentId = crypto.randomUUID();
-      const parentKeywords = extractKeywords(sec, doc.citation_code);
-      const parentChunk: DocumentChunk = {
-        chunk_id: parentId,
-        version_id: versionId,
-        parent_chunk_id: null,
-        chunk_tier: 'parent',
-        kind: isTable ? 'table' : 'text',
-        page_number: pageNum,
-        ocr_confidence: 0.99,
-        text_content: sec,
-        token_count: tokenize(sec).length,
-        keywords: parentKeywords,
-      };
-      this.addChunk(parentChunk);
-      parentCount += 1;
-
-      // Split parent into 1-2 focused child chunks for fine-grained Qdrant retrieval
-      const childTexts: string[] = [];
-      if (sec.length > 480 && !isTable) {
-        const sentences = sec.split(/(?<=[.!?])\s+/);
-        const mid = Math.ceil(sentences.length / 2);
-        const firstHalf = sentences.slice(0, mid).join(' ').trim();
-        const secondHalf = sentences.slice(mid).join(' ').trim();
-        if (firstHalf) childTexts.push(firstHalf);
-        if (secondHalf) childTexts.push(secondHalf);
-      } else {
-        childTexts.push(sec);
-      }
-
-      for (const cText of childTexts) {
-        const childId = crypto.randomUUID();
-        const childChunk: DocumentChunk = {
-          chunk_id: childId,
-          version_id: versionId,
-          parent_chunk_id: parentId,
-          chunk_tier: 'child',
-          kind: isTable ? 'table' : 'text',
-          page_number: pageNum,
-          ocr_confidence: 0.99,
-          text_content: cText,
-          token_count: tokenize(cText).length,
-          keywords: extractKeywords(cText, doc.citation_code),
-        };
-        const added = this.addChunk(childChunk);
-        if (added.ok) {
-          childCount += 1;
-          this.outbox.push({
-            outbox_id: this.nextOutboxId++,
-            chunk_id: childId,
-            doc_id: docId,
-            op_type: 'upsert',
-            payload_hash: payloadHash,
-            created_at: nowIso,
-            processed_at: this.indexWorkerPaused ? null : nowIso,
-          });
-          const pt = this.buildQdrantPoint(childChunk);
-          if (pt) {
-            if (!this.indexWorkerPaused) {
-              this.qdrantPoints.set(childId, pt);
-            }
-            createdPoints.push(pt);
+        const pt = this.buildQdrantPoint(childChunk);
+        if (pt) {
+          if (!this.indexWorkerPaused) {
+            this.qdrantPoints.set(childChunk.chunk_id, pt);
           }
+          createdPoints.push(pt);
         }
       }
-    });
+    }
 
     this.corpusEpoch += 1;
 
@@ -484,9 +420,9 @@ export class RegulatoryLedger {
       citation_code: doc.citation_code,
       sensitivity: doc.sensitivity,
       effective_from: effectiveFromIso,
-      parent_chunks_created: parentCount,
+      parent_chunks_created: chunked.parentChunks.length,
       child_chunks_indexed: childCount,
-      quarantined_count: quarantinedCount,
+      quarantined_count: chunked.quarantined.length,
       points: createdPoints,
     };
   }
@@ -644,15 +580,38 @@ export class RegulatoryLedger {
 
     const bm25Scores = new Map<string, number>();
     const denseScores = new Map<string, number>();
-    const rawWords = tokenize(qLower).filter((w) => w.length > 2);
+    const rawWords = Array.from(
+      new Set(tokenize(qLower).filter((w) => w.length > 2 && !STOPWORDS.has(w)))
+    );
+
+    // Document frequency across authorized temporal slice for true BM25/IDF precision
+    const chunkTokenSets = new Map<string, Set<string>>();
+    const df = new Map<string, number>();
+    for (const p of filtered) {
+      const tokSet = new Set(tokenize(p.text_content));
+      chunkTokenSets.set(p.chunk_id, tokSet);
+      for (const w of rawWords) {
+        if (tokSet.has(w)) {
+          df.set(w, (df.get(w) ?? 0) + 1);
+        }
+      }
+    }
+    const nDocs = Math.max(1, filtered.length);
+    let totalIdf = 0;
+    const idfMap = new Map<string, number>();
+    for (const w of rawWords) {
+      const idf = Math.log(1 + (nDocs + 0.5) / ((df.get(w) ?? 0) + 0.5));
+      idfMap.set(w, idf);
+      totalIdf += idf;
+    }
 
     for (const p of filtered) {
-      const docTokenSet = new Set(tokenize(p.text_content));
-      let lexMatches = 0;
+      const docTokenSet = chunkTokenSets.get(p.chunk_id)!;
+      let weightedMatches = 0;
       for (const w of rawWords) {
-        if (docTokenSet.has(w)) lexMatches += 1;
+        if (docTokenSet.has(w)) weightedMatches += idfMap.get(w) ?? 1;
       }
-      const bm25 = rawWords.length > 0 ? lexMatches / rawWords.length : 0;
+      const bm25 = totalIdf > 0 ? weightedMatches / totalIdf : 0;
       bm25Scores.set(p.chunk_id, bm25);
 
       let semHits = 0;
@@ -662,7 +621,7 @@ export class RegulatoryLedger {
           semHits += 2;
         } else {
           for (const sub of kw.split(/\s+/)) {
-            if (qTerms.has(sub)) semHits += 0.65;
+            if (!STOPWORDS.has(sub) && qTerms.has(sub)) semHits += 0.65;
           }
         }
       }
@@ -684,11 +643,14 @@ export class RegulatoryLedger {
       const dRank = denseRanked.find((r) => r.chunk_id === p.chunk_id)!;
       let score = 0;
       if (mode === 'bm25') {
-        score = bRank.score;
+        score = bRank.score >= 0.25 ? bRank.score : 0;
       } else if (mode === 'dense') {
-        score = dRank.score;
+        score = dRank.score >= 0.35 ? dRank.score : 0;
       } else {
-        const hasSignal = bRank.score > 0.12 || dRank.score > 0.24;
+        const hasSignal =
+          (bRank.score >= 0.22 && dRank.score >= 0.22) ||
+          bRank.score >= 0.34 ||
+          dRank.score >= 0.42;
         score = hasSignal ? 1 / (60 + bRank.rank) + 1 / (60 + dRank.rank) + (bRank.score + dRank.score) * 0.45 : 0;
       }
       return {
@@ -700,7 +662,7 @@ export class RegulatoryLedger {
     });
 
     return results
-      .filter((r) => r.rrf_score > 0.14)
+      .filter((r) => r.rrf_score > 0.25)
       .sort((a, b) => b.rrf_score - a.rrf_score)
       .slice(0, limit);
   }
@@ -730,7 +692,9 @@ export class RegulatoryLedger {
     const expandedSet = expandTerms(query);
     const activeGroups = this.currentPrincipalGroups(principalId);
     const asOfSec = Math.floor(asOfMs / 1000);
-    const rawWords = tokens.filter((w) => w.length > 2);
+    const rawWords = Array.from(
+      new Set(tokens.filter((w) => w.length > 2 && !STOPWORDS.has(w)))
+    );
     const docJoined = ` ${Array.from(expandedSet).join(' ')} `;
 
     const scored: Array<{
@@ -811,6 +775,72 @@ export class RegulatoryLedger {
   }
 
   public getSnapshot(nowMs = Date.now()): LedgerSnapshot {
+    const starterDocIds = new Set(SEED_DOCUMENTS.map((d) => d.doc_id));
+
+    const mappedDocuments = this.documents.map((d) => {
+      const origin: 'starter' | 'user_upload' = starterDocIds.has(d.doc_id) ? 'starter' : 'user_upload';
+      const pgGroups = this.getDocAclGroups(d.doc_id);
+      const docVersions = this.versions
+        .filter((v) => v.doc_id === d.doc_id)
+        .map((v) => {
+          const vChunks = this.chunks.filter((c) => c.version_id === v.version_id);
+          const vParents = vChunks.filter((c) => c.chunk_tier === 'parent');
+          const vChildren = vChunks.filter((c) => c.chunk_tier === 'child');
+          const vPages = new Set(vChunks.map((c) => c.page_number));
+          return {
+            ...v,
+            parent_section_count: vParents.length,
+            vector_point_count: vChildren.length,
+            pages_count: vPages.size,
+          };
+        });
+      const docVersionIds = new Set(docVersions.map((v) => v.version_id));
+      const parentSectionCount = this.chunks.filter(
+        (c) => c.chunk_tier === 'parent' && docVersionIds.has(c.version_id)
+      ).length;
+      const docChildren = this.chunks.filter(
+        (c) => c.chunk_tier === 'child' && docVersionIds.has(c.version_id)
+      );
+      const docQuarantineCount = this.quarantine.filter((q) => q.doc_id === d.doc_id).length;
+      const firstChild = docChildren[0];
+      const qPoint = firstChild ? this.qdrantPoints.get(firstChild.chunk_id) : undefined;
+      const qGroups = qPoint ? [...qPoint.allowed_groups].sort() : [];
+      return {
+        ...d,
+        origin,
+        postgres_acl_groups: pgGroups,
+        qdrant_acl_groups: qGroups,
+        acl_in_sync: JSON.stringify(pgGroups) === JSON.stringify(qGroups),
+        parent_section_count: parentSectionCount,
+        vector_point_count: docChildren.length,
+        quarantine_count: docQuarantineCount,
+        versions: docVersions,
+      };
+    });
+
+    const starterDocs = mappedDocuments.filter((d) => d.origin === 'starter');
+    const userDocs = mappedDocuments.filter((d) => d.origin === 'user_upload');
+
+    let starterVectorCount = 0;
+    let userVectorCount = 0;
+    for (const pt of this.qdrantPoints.values()) {
+      if (starterDocIds.has(pt.doc_id)) {
+        starterVectorCount += 1;
+      } else {
+        userVectorCount += 1;
+      }
+    }
+
+    let starterQuarantineCount = 0;
+    let userQuarantineCount = 0;
+    for (const q of this.quarantine) {
+      if (starterDocIds.has(q.doc_id)) {
+        starterQuarantineCount += 1;
+      } else {
+        userQuarantineCount += 1;
+      }
+    }
+
     return {
       corpus_epoch: this.corpusEpoch,
       index_worker_paused: this.indexWorkerPaused,
@@ -819,23 +849,7 @@ export class RegulatoryLedger {
         active_groups_now: this.currentPrincipalGroups(p.principal_id, nowMs),
         memberships: this.memberships.filter((m) => m.principal_id === p.principal_id),
       })),
-      documents: this.documents.map((d) => {
-        const pgGroups = this.getDocAclGroups(d.doc_id);
-        const firstChild = this.chunks.find(
-          (c) =>
-            c.chunk_tier === 'child' &&
-            this.versions.some((v) => v.doc_id === d.doc_id && v.version_id === c.version_id)
-        );
-        const qPoint = firstChild ? this.qdrantPoints.get(firstChild.chunk_id) : undefined;
-        const qGroups = qPoint ? [...qPoint.allowed_groups].sort() : [];
-        return {
-          ...d,
-          postgres_acl_groups: pgGroups,
-          qdrant_acl_groups: qGroups,
-          acl_in_sync: JSON.stringify(pgGroups) === JSON.stringify(qGroups),
-          versions: this.versions.filter((v) => v.doc_id === d.doc_id),
-        };
-      }),
+      documents: mappedDocuments,
       outbox: [...this.outbox].reverse().slice(0, 30),
       quarantine: this.quarantine,
       query_log: [...this.queryLog].reverse().slice(0, 25),
@@ -847,7 +861,106 @@ export class RegulatoryLedger {
         child_chunk_count: this.chunks.filter((c) => c.chunk_tier === 'child').length,
         qdrant_point_count: this.qdrantPoints.size,
         quarantine_count: this.quarantine.length,
+        starter_document_count: starterDocs.length,
+        starter_version_count: starterDocs.reduce((acc, d) => acc + d.versions.length, 0),
+        starter_parent_chunk_count: starterDocs.reduce((acc, d) => acc + d.parent_section_count, 0),
+        starter_vector_point_count: starterVectorCount,
+        starter_quarantine_count: starterQuarantineCount,
+        user_document_count: userDocs.length,
+        user_version_count: userDocs.reduce((acc, d) => acc + d.versions.length, 0),
+        user_parent_chunk_count: userDocs.reduce((acc, d) => acc + d.parent_section_count, 0),
+        user_vector_point_count: userVectorCount,
+        user_quarantine_count: userQuarantineCount,
       },
+    };
+  }
+
+  public getDocumentFirstPagePreview(
+    docId: string,
+    requestedVersionId?: string
+  ): DocumentFirstPagePreview | null {
+    const doc = this.documents.find((d) => d.doc_id === docId);
+    if (!doc) return null;
+
+    const starterDocIds = new Set(SEED_DOCUMENTS.map((d) => d.doc_id));
+    const origin: 'starter' | 'user_upload' = starterDocIds.has(doc.doc_id)
+      ? 'starter'
+      : 'user_upload';
+
+    const docVersions = [...this.versions.filter((v) => v.doc_id === docId)].sort(
+      (a, b) => new Date(a.effective_from).getTime() - new Date(b.effective_from).getTime()
+    );
+    if (docVersions.length === 0) return null;
+
+    const activeVersion =
+      (requestedVersionId
+        ? docVersions.find((v) => v.version_id === requestedVersionId)
+        : undefined) ?? docVersions[docVersions.length - 1];
+
+    const versionParents = this.chunks
+      .filter((c) => c.version_id === activeVersion.version_id && c.chunk_tier === 'parent')
+      .sort((a, b) => a.page_number - b.page_number);
+
+    const distinctPages = new Set(versionParents.map((c) => c.page_number));
+    const firstPageNumber = versionParents.length > 0 ? versionParents[0].page_number : null;
+
+    const firstPageParents =
+      firstPageNumber === null
+        ? []
+        : versionParents.filter((c) => c.page_number === firstPageNumber);
+    const firstPageParentIds = new Set(firstPageParents.map((p) => p.chunk_id));
+
+    const firstPageChildren = this.chunks
+      .filter(
+        (c) =>
+          c.version_id === activeVersion.version_id &&
+          c.chunk_tier === 'child' &&
+          ((c.parent_chunk_id && firstPageParentIds.has(c.parent_chunk_id)) ||
+            (firstPageNumber !== null && c.page_number === firstPageNumber))
+      )
+      .map((c) => ({
+        chunk_id: c.chunk_id,
+        kind: c.kind,
+        token_count: c.token_count,
+        text_content: c.text_content,
+        in_qdrant: this.qdrantPoints.has(c.chunk_id),
+      }));
+
+    const docQuarantined = this.quarantine
+      .filter((q) => q.doc_id === doc.doc_id)
+      .map((q) => ({
+        quarantine_id: q.quarantine_id,
+        page_number: q.page_number,
+        reason_code: q.reason_code,
+      }));
+
+    return {
+      doc_id: doc.doc_id,
+      title: doc.title,
+      citation_code: doc.citation_code,
+      origin,
+      sensitivity: doc.sensitivity,
+      version_id: activeVersion.version_id,
+      version_label: activeVersion.version_label,
+      effective_from: activeVersion.effective_from,
+      effective_to: activeVersion.effective_to,
+      available_versions: docVersions.map((v) => ({
+        version_id: v.version_id,
+        version_label: v.version_label,
+        effective_from: v.effective_from,
+        effective_to: v.effective_to,
+      })),
+      total_pages_indexed: distinctPages.size,
+      preview_page_number: firstPageNumber,
+      parent_sections: firstPageParents.map((p) => ({
+        chunk_id: p.chunk_id,
+        kind: p.kind,
+        ocr_confidence: p.ocr_confidence,
+        token_count: p.token_count,
+        text_content: p.text_content,
+      })),
+      child_vectors: firstPageChildren,
+      quarantined_items: docQuarantined,
     };
   }
 }

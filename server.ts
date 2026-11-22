@@ -11,6 +11,7 @@ import {
   GOLDEN_BENCHMARK_DISTRIBUTION,
   SMOKE_EVAL_QUESTIONS,
 } from './src/server/corpus.ts';
+import type { PageInput } from './src/server/chunker.ts';
 import { processUploadedDocumentBuffer } from './src/server/documentProcessor.ts';
 import { RegulatoryLedger } from './src/server/ledger.ts';
 import { embedTextWithOllamaOrFallback, probeOllama } from './src/server/ollamaClient.ts';
@@ -21,6 +22,8 @@ import {
   runFiveStageQuery,
 } from './src/server/pipeline.ts';
 import {
+  clearQdrantCollectionPoints,
+  deletePointsFromQdrant,
   probeQdrant,
   syncAclPayloadInQdrant,
   upsertPointsToQdrant,
@@ -145,7 +148,8 @@ async function startServer() {
   const app = express();
   app.use(express.json({ limit: '2mb' }));
 
-  const ledger = new RegulatoryLedger();
+  const startEmpty = (process.env.LOAD_STARTER_CORPUS ?? 'true').trim().toLowerCase() === 'false';
+  const ledger = new RegulatoryLedger({ empty: startEmpty });
 
   const syncAllToLiveQdrantIfReachable = async () => {
     try {
@@ -245,6 +249,7 @@ async function startServer() {
     version_label?: string;
     source_url?: string;
     raw_text: string;
+    pages?: PageInput[];
     metadata?: {
       source_filename?: string;
       detected_format?: string;
@@ -261,6 +266,7 @@ async function startServer() {
       version_label: params.version_label,
       source_url: params.source_url,
       raw_text: params.raw_text,
+      pages: params.pages,
     });
 
     let syncRes = {
@@ -322,6 +328,7 @@ async function startServer() {
         version_label,
         source_url,
         raw_text,
+        pages,
       } = req.body ?? {};
 
       if (typeof title !== 'string' || title.trim().length < 3 || title.trim().length > 200) {
@@ -344,6 +351,18 @@ async function startServer() {
         return res.status(400).json({ error: 'Policy text must be between 20 and 500,000 characters.' });
       }
 
+      const validatedPages: PageInput[] | undefined = Array.isArray(pages)
+        ? pages
+            .filter(
+              (p): p is { page_number: number; text: string } =>
+                Boolean(p) &&
+                typeof p === 'object' &&
+                typeof (p as { page_number?: unknown }).page_number === 'number' &&
+                typeof (p as { text?: unknown }).text === 'string'
+            )
+            .slice(0, 2000)
+        : undefined;
+
       const payload = await ingestAndSyncPolicy({
         title,
         citation_code,
@@ -352,6 +371,7 @@ async function startServer() {
         version_label: typeof version_label === 'string' ? version_label : undefined,
         source_url: typeof source_url === 'string' ? source_url : undefined,
         raw_text,
+        pages: validatedPages,
       });
       return res.json(payload);
     } catch (err) {
@@ -420,6 +440,7 @@ async function startServer() {
         version_label: versionInput || undefined,
         source_url: `upload://${path.basename(req.file.originalname)}`,
         raw_text: processed.raw_text,
+        pages: processed.pages,
         metadata: {
           source_filename: req.file.originalname,
           detected_format: processed.detected_format,
@@ -552,11 +573,48 @@ async function startServer() {
     return res.json({ report, snapshot: ledger.getSnapshot() });
   });
 
-  app.post('/api/admin/reset', (_req, res) => {
-    ledger.reset();
-    void syncAllToLiveQdrantIfReachable();
+  app.post('/api/admin/reset', async (req, res) => {
+    const empty = Boolean(req.body?.empty);
+    ledger.reset({ empty });
+    await clearQdrantCollectionPoints();
+    if (!empty) {
+      await syncAllToLiveQdrantIfReachable();
+    }
     void flushLexGateRedisKeys();
-    return res.json({ snapshot: ledger.getSnapshot() });
+    const runtime = await getSystemRuntimeStatus(true);
+    return res.json({ snapshot: ledger.getSnapshot(), runtime });
+  });
+
+  app.post('/api/admin/clear-samples', async (_req, res) => {
+    ledger.reset({ empty: true });
+    await clearQdrantCollectionPoints();
+    void flushLexGateRedisKeys();
+    const runtime = await getSystemRuntimeStatus(true);
+    return res.json({ snapshot: ledger.getSnapshot(), runtime });
+  });
+
+  app.get('/api/admin/documents/:docId/preview', (req, res) => {
+    const { docId } = req.params;
+    const versionId = typeof req.query.versionId === 'string' ? req.query.versionId : undefined;
+    const preview = ledger.getDocumentFirstPagePreview(docId, versionId);
+    if (!preview) {
+      return res.status(404).json({ error: 'Document preview not found.' });
+    }
+    return res.json({ preview });
+  });
+
+  app.delete('/api/admin/documents/:docId', async (req, res) => {
+    const { docId } = req.params;
+    const outcome = ledger.deleteDocument(docId);
+    if (!outcome.deleted) {
+      return res.status(404).json({ error: 'Document not found.' });
+    }
+    if (outcome.deletedChunkIds.length > 0) {
+      await deletePointsFromQdrant(outcome.deletedChunkIds);
+    }
+    void flushLexGateRedisKeys();
+    const runtime = await getSystemRuntimeStatus(true);
+    return res.json({ deleted: true, snapshot: ledger.getSnapshot(), runtime });
   });
 
   app.post('/api/admin/quarantine-test', (req, res) => {

@@ -109,8 +109,12 @@ def upload_via_lexgate_api(
 
     title = pdf_path.stem.replace("_", " ").replace("-", " ").strip()
     citation_code = pdf_path.stem.upper()[:32]
-    # Join clean sections with double newlines so LexGate creates Parent + Child chunks & Qdrant vectors
+    # Join clean sections with double newlines and include explicit page numbers
     raw_text = "\n\n".join(c["text"] for c in chunks)
+    pages_payload = [
+        {"page_number": int(c["page_number"]), "text": c["text"]}
+        for c in chunks
+    ]
 
     resp = requests.post(
         f"{api_url.rstrip('/')}/api/admin/upload-document",
@@ -121,6 +125,7 @@ def upload_via_lexgate_api(
             "effective_from": f"{effective_from}T00:00:00Z",
             "version_label": f"{citation_code} (Local PDF Import)",
             "raw_text": raw_text,
+            "pages": pages_payload,
         },
         timeout=60,
     )

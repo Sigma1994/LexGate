@@ -20,6 +20,7 @@ export type SupportedUploadExtension = (typeof SUPPORTED_UPLOAD_EXTENSIONS)[numb
 
 export interface ProcessedDocumentResult {
   raw_text: string;
+  pages: Array<{ page_number: number; text: string }>;
   detected_format: string;
   pages_extracted: number;
   extracted_chars: number;
@@ -296,24 +297,29 @@ export async function processUploadedDocumentBuffer(params: {
 
   const titleHint = suggestTitleFromFilename(filename);
   let rawText = '';
+  let structuredPages: Array<{ page_number: number; text: string }> = [];
   let detectedFormat = ext.replace('.', '').toUpperCase();
   let pagesExtracted = 1;
   let processingSummary = '';
 
   if (ext === '.pdf') {
     const result = await extractText(new Uint8Array(buffer), { mergePages: false });
-    const pageTexts = (Array.isArray(result.text) ? result.text : [String(result.text ?? '')])
-      .map((p) => normalizePlainOrMarkdown(p))
-      .filter((p) => p.length > 0);
-    pagesExtracted = result.totalPages || pageTexts.length || 1;
-    rawText = pageTexts.join('\n\n');
+    const rawPageArray = Array.isArray(result.text) ? result.text : [String(result.text ?? '')];
+    structuredPages = rawPageArray
+      .map((p, idx) => ({
+        page_number: idx + 1,
+        text: normalizePlainOrMarkdown(p),
+      }))
+      .filter((p) => p.text.length > 0);
+    pagesExtracted = result.totalPages || structuredPages.length || 1;
+    rawText = structuredPages.map((p) => p.text).join('\n\n');
     if (rawText.trim().length < 20) {
       throw new Error(
         'This PDF appears to contain scanned images rather than selectable text (or is empty). Run OCR first or upload a searchable PDF / DOCX / TXT file.'
       );
     }
     detectedFormat = 'PDF Document';
-    processingSummary = `Extracted ${pageTexts.length} searchable page(s) of ${pagesExtracted} total PDF page(s) -> Qdrant-ready sections`;
+    processingSummary = `Extracted ${structuredPages.length} searchable page(s) of ${pagesExtracted} total PDF page(s) with exact page numbers -> Qdrant-ready sections`;
   } else if (ext === '.docx') {
     const htmlRes = await mammoth.convertToHtml({ buffer });
     rawText = htmlToCleanMarkdown(htmlRes.value || '');
@@ -324,46 +330,52 @@ export async function processUploadedDocumentBuffer(params: {
     if (rawText.trim().length < 20) {
       throw new Error('Could not extract readable text from this .docx file.');
     }
-    const sectionCount = rawText.split(/\n{2,}/).filter(Boolean).length;
-    pagesExtracted = Math.max(1, sectionCount);
+    const sections = rawText.split(/\n{2,}/).filter(Boolean);
+    structuredPages = sections.map((text, idx) => ({ page_number: idx + 1, text }));
+    pagesExtracted = Math.max(1, sections.length);
     detectedFormat = 'Word Document (.docx)';
-    processingSummary = `Converted DOCX headings, paragraphs & Word tables into ${sectionCount} Markdown section(s)`;
+    processingSummary = `Converted DOCX headings, paragraphs & Word tables into ${sections.length} Markdown section(s)`;
   } else if (ext === '.csv' || ext === '.tsv') {
     const delimiter: ',' | '\t' = ext === '.tsv' ? '\t' : ',';
     const utf8 = buffer.toString('utf8');
     rawText = delimitedToMarkdownSections(utf8, delimiter, titleHint);
-    const sectionCount = rawText.split(/\n{2,}/).filter(Boolean).length;
-    pagesExtracted = Math.max(1, sectionCount);
+    const sections = rawText.split(/\n{2,}/).filter(Boolean);
+    structuredPages = sections.map((text, idx) => ({ page_number: idx + 1, text }));
+    pagesExtracted = Math.max(1, sections.length);
     detectedFormat = ext === '.tsv' ? 'TSV Spreadsheet' : 'CSV Spreadsheet';
-    processingSummary = `Parsed delimited spreadsheet into ${sectionCount} header-preserved Markdown table section(s)`;
+    processingSummary = `Parsed delimited spreadsheet into ${sections.length} header-preserved Markdown table section(s)`;
   } else if (ext === '.html' || ext === '.htm') {
     rawText = htmlToCleanMarkdown(buffer.toString('utf8'));
-    const sectionCount = rawText.split(/\n{2,}/).filter(Boolean).length;
-    pagesExtracted = Math.max(1, sectionCount);
+    const sections = rawText.split(/\n{2,}/).filter(Boolean);
+    structuredPages = sections.map((text, idx) => ({ page_number: idx + 1, text }));
+    pagesExtracted = Math.max(1, sections.length);
     detectedFormat = 'HTML Document';
-    processingSummary = `Stripped markup/scripts safely and converted HTML content & tables into ${sectionCount} Markdown section(s)`;
+    processingSummary = `Stripped markup/scripts safely and converted HTML content & tables into ${sections.length} Markdown section(s)`;
   } else if (ext === '.json') {
     try {
       rawText = jsonToCleanSections(buffer.toString('utf8'));
     } catch {
       throw new Error('Invalid JSON file. Please verify the file is valid UTF-8 JSON.');
     }
-    const sectionCount = rawText.split(/\n{2,}/).filter(Boolean).length;
-    pagesExtracted = Math.max(1, sectionCount);
+    const sections = rawText.split(/\n{2,}/).filter(Boolean);
+    structuredPages = sections.map((text, idx) => ({ page_number: idx + 1, text }));
+    pagesExtracted = Math.max(1, sections.length);
     detectedFormat = 'JSON Policy Data';
-    processingSummary = `Structured JSON objects/arrays into ${sectionCount} readable policy section(s)`;
+    processingSummary = `Structured JSON objects/arrays into ${sections.length} readable policy section(s)`;
   } else if (ext === '.rtf') {
     rawText = rtfToCleanText(buffer.toString('utf8'));
-    const sectionCount = rawText.split(/\n{2,}/).filter(Boolean).length;
-    pagesExtracted = Math.max(1, sectionCount);
+    const sections = rawText.split(/\n{2,}/).filter(Boolean);
+    structuredPages = sections.map((text, idx) => ({ page_number: idx + 1, text }));
+    pagesExtracted = Math.max(1, sections.length);
     detectedFormat = 'Rich Text (.rtf)';
-    processingSummary = `Stripped RTF control codes into ${sectionCount} clean text section(s)`;
+    processingSummary = `Stripped RTF control codes into ${sections.length} clean text section(s)`;
   } else {
     rawText = normalizePlainOrMarkdown(buffer.toString('utf8'));
-    const sectionCount = rawText.split(/\n{2,}/).filter(Boolean).length;
-    pagesExtracted = Math.max(1, sectionCount);
+    const sections = rawText.split(/\n{2,}/).filter(Boolean);
+    structuredPages = sections.map((text, idx) => ({ page_number: idx + 1, text }));
+    pagesExtracted = Math.max(1, sections.length);
     detectedFormat = ext === '.txt' ? 'Plain Text (.txt)' : 'Markdown (.md)';
-    processingSummary = `Normalized line endings into ${sectionCount} section(s)`;
+    processingSummary = `Normalized line endings into ${sections.length} section(s)`;
   }
 
   if (rawText.trim().length < 20) {
@@ -376,6 +388,7 @@ export async function processUploadedDocumentBuffer(params: {
 
   return {
     raw_text: rawText,
+    pages: structuredPages,
     detected_format: detectedFormat,
     pages_extracted: pagesExtracted,
     extracted_chars: rawText.length,

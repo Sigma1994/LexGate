@@ -20,7 +20,7 @@ docker exec -it lexgate_ollama ollama pull llama3.1:8b && docker exec -it lexgat
 
 ### 3. Configure `.env` and Start the App
 
-Put those 7 lines in `.env` (or `cp .env.example .env`):
+Put these settings in `.env` (or `cp .env.example .env`):
 
 ```env
 LLM_PROVIDER=auto
@@ -30,9 +30,10 @@ OLLAMA_EMBED_MODEL=nomic-embed-text
 QDRANT_URL=http://localhost:6333
 QDRANT_COLLECTION=lexgate_policies
 QDRANT_API_KEY=
+LOAD_STARTER_CORPUS=true
 ```
 
-*(Optional local Redis settings already included in `.env.example`: `REDIS_URL=redis://localhost:6379` and `REDIS_TTL_SECONDS=3600`.)*
+*(Optional local Redis settings already included in `.env.example`: `REDIS_URL=redis://localhost:6379` and `REDIS_TTL_SECONDS=3600`. Set `LOAD_STARTER_CORPUS=false` if you want an empty Policy Library on boot containing only your own uploaded documents.)*
 
 Then run:
 
@@ -49,7 +50,7 @@ Open `http://localhost:3000`.
 
 ### Optional: Batch Ingest Local `.pdf` Files (`PyMuPDF` / `Unstructured` / `all-MiniLM-L6-v2`)
 
-While **Policy Library** supports direct paste and `.txt`/`.md`/`.csv` uploads in the browser, you can batch-ingest binary `.pdf` files locally using `scripts/ingest_pdfs.py`:
+While **Policy Library** supports drag-and-drop uploads for `.pdf`, `.docx` (Word), `.csv`/`.tsv`, `.html`, `.json`, `.rtf`, `.md`, and `.txt` directly in the browser, you can also batch-ingest folders of local `.pdf` files from the CLI using `scripts/ingest_pdfs.py`:
 
 ```bash
 pip install -r scripts/requirements-ingest.txt
@@ -61,9 +62,9 @@ python scripts/ingest_pdfs.py --dir ./pdfs --parser pymupdf --sensitivity compli
 
 ## Key Capabilities
 
-- **Rich 2025–2026 Regulatory Corpus:** Covers Central Bank of Kenya Act (Cap. 491, 1966–2012), Capital Adequacy (CBK/PG/03), Liquidity Circular 11/2024, OAG Audit Report, Banking (Amendment) Act 2025, ODPC Financial Data Protection 2025, CBK Cyber Resilience & AI Governance 2026, AML/CFT & VASP Travel Rule 2026, IFRS 9 Credit Loss 2026, and Internal Audit FX/Insider Lending 2026.
-- **Direct Policy Upload to Qdrant:** Paste text or upload `.txt`/`.md`/`.csv` policies directly in **Policy Library**, validate tables automatically (Safety Hold quarantine for jagged tables), generate 768-dim embeddings, and upsert into Qdrant immediately.
-- **AI & ML Process Crash Course & Inspector:** Step-by-step student AI engineer walkthrough covering parsing, parent-child chunking, 768-dim Cosine embeddings, BM25 + Dense RRF fusion, `with_payload=false` security, O(1) epoch-keyed Redis caching, RAG vs. fine-tuning, and a live interactive pipeline inspector.
+- **Multi-Page Regulatory Corpus & Unified Chunker:** Covers 10 policies / 12 versions (Central Bank of Kenya Act Cap. 491, CBK/PG/03, Liquidity Circular 11/2024, OAG Audit Report, Banking Amendment Act 2025, ODPC Data Protection 2025, CBK Cyber & AI Governance 2026, AML/CFT & VASP 2026, IFRS 9 2026, and Internal Audit 2026) processed through the exact same Parent-Child & table-preserving pipeline as live uploads.
+- **Direct Multi-Format Upload to Qdrant:** Drop `.pdf`, `.docx`, `.csv`/`.tsv`, `.html`, `.json`, `.rtf`, `.md`, or `.txt` files directly in **Policy Library**, validate tables automatically (Safety Hold quarantine for jagged tables), generate 768-dim embeddings, and upsert into Qdrant immediately.
+- **AI & ML Process Crash Course & Inspector:** Step-by-step engineer walkthrough covering parsing, parent-child chunking, 768-dim Cosine embeddings, BM25 + Dense RRF fusion, `with_payload=false` security, O(1) epoch-keyed Redis caching, RAG vs. fine-tuning, and a live interactive pipeline inspector.
 - **Privacy Guard & Safety Guarantees:** 10 automated security, bitemporal boundary, drift self-healing, and indistinguishable abstention checks.
 
 ## Production Scaling Notes

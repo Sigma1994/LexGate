@@ -1,17 +1,25 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import {
+  AlertCircle,
   ArrowRight,
   CheckCircle2,
   Eye,
   FilePlus2,
   FileText,
+  Info,
+  Loader2,
+  RotateCcw,
   Search,
   ShieldBan,
+  Trash2,
   Upload,
   X,
 } from 'lucide-react';
-import { safeFetchJson } from '../lib/safeFetchJson.ts';
+import { postFormDataWithProgress, safeFetchJson } from '../lib/safeFetchJson.ts';
+import { DatabaseStatusModal } from './DatabaseStatusModal.tsx';
+import { DocumentHistoryViz, matchesPolicyDocumentSearch } from './DocumentHistoryViz.tsx';
 import type {
+  DocumentFirstPagePreview,
   GroupId,
   LedgerSnapshot,
   QuarantineReasonCode,
@@ -104,17 +112,60 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadResult, setUploadResult] = useState<UploadDocumentResult | null>(null);
+  const [corpusActionBusy, setCorpusActionBusy] = useState(false);
+  const [deletingDocId, setDeletingDocId] = useState<string | null>(null);
+  const [isDbStatusOpen, setIsDbStatusOpen] = useState(false);
+  const [selectedPreviewDocId, setSelectedPreviewDocId] = useState<string | null>(null);
+  const [previewData, setPreviewData] = useState<DocumentFirstPagePreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewTab, setPreviewTab] = useState<'page' | 'vectors'>('page');
+  const [uploadBatches, setUploadBatches] = useState<
+    Array<{
+      batch_id: string;
+      batch_number: number;
+      label: string;
+      status: 'uploading' | 'vectorizing' | 'success' | 'failed';
+      progress: number;
+      detail: string;
+    }>
+  >([]);
+  const uploadSectionRef = useRef<HTMLElement | null>(null);
+  const catalogSectionRef = useRef<HTMLElement | null>(null);
+  const previewPaneRef = useRef<HTMLDivElement | null>(null);
+  const batchCounterRef = useRef(0);
+
+  const loadDocumentPreview = async (
+    docId: string,
+    versionId?: string,
+    scrollToPreview = false
+  ) => {
+    setSelectedPreviewDocId(docId);
+    setPreviewLoading(true);
+    setPreviewError(null);
+    if (scrollToPreview) {
+      setTimeout(() => {
+        previewPaneRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }, 40);
+    }
+    try {
+      const qs = versionId ? `?versionId=${encodeURIComponent(versionId)}` : '';
+      const { data } = await safeFetchJson<{ preview: DocumentFirstPagePreview }>(
+        `/api/admin/documents/${encodeURIComponent(docId)}/preview${qs}`
+      );
+      setPreviewData(data.preview);
+    } catch (err) {
+      setPreviewError(err instanceof Error ? err.message : 'Unable to load document preview.');
+      setPreviewData(null);
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
 
   const filteredDocuments = useMemo(() => {
-    const q = searchFilter.trim().toLowerCase();
     return snapshot.documents.filter((doc) => {
       if (tierFilter !== 'all' && doc.sensitivity !== tierFilter) return false;
-      if (!q) return true;
-      return (
-        doc.title.toLowerCase().includes(q) ||
-        doc.citation_code.toLowerCase().includes(q) ||
-        doc.versions.some((v) => v.version_label.toLowerCase().includes(q))
-      );
+      return matchesPolicyDocumentSearch(doc, searchFilter);
     });
   }, [snapshot.documents, searchFilter, tierFilter]);
 
@@ -181,11 +232,40 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
     }
   };
 
+  const updateUploadBatch = (
+    batchId: string,
+    patch: Partial<{
+      status: 'uploading' | 'vectorizing' | 'success' | 'failed';
+      progress: number;
+      detail: string;
+    }>
+  ) => {
+    setUploadBatches((prev) =>
+      prev.map((b) => (b.batch_id === batchId ? { ...b, ...patch } : b))
+    );
+  };
+
   const handleUploadSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setUploading(true);
     setUploadError(null);
     setUploadResult(null);
+
+    const batchNumber = ++batchCounterRef.current;
+    const batchId = `batch-${batchNumber}-${Date.now()}`;
+    const batchLabel = selectedFile?.name || title.trim() || citationCode.trim() || 'Policy Batch';
+    setUploadBatches((prev) => [
+      {
+        batch_id: batchId,
+        batch_number: batchNumber,
+        label: batchLabel,
+        status: 'uploading',
+        progress: 12,
+        detail: 'Uploading payload...',
+      },
+      ...prev.slice(0, 5),
+    ]);
+
     try {
       if (selectedFile && rawText.trim().length === 0) {
         const form = new FormData();
@@ -196,12 +276,26 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
         form.append('effective_from', `${effectiveFrom}T00:00:00Z`);
         if (versionLabel.trim()) form.append('version_label', versionLabel.trim());
 
-        const { data } = await safeFetchJson<{
+        const { data } = await postFormDataWithProgress<{
           upload: UploadDocumentResult;
           snapshot?: LedgerSnapshot;
-        }>('/api/admin/upload-file', {
-          method: 'POST',
-          body: form,
+        }>('/api/admin/upload-file', form, (pct, phase) => {
+          updateUploadBatch(batchId, {
+            status: phase,
+            progress: pct,
+            detail:
+              phase === 'uploading'
+                ? 'Uploading file to server...'
+                : 'Extracting pages & vectorizing to Qdrant...',
+          });
+        });
+
+        updateUploadBatch(batchId, {
+          status: 'success',
+          progress: 100,
+          detail: `${data.upload.parent_chunks_created} sec · ${data.upload.child_chunks_indexed} vec${
+            data.upload.quarantined_count > 0 ? ` · ${data.upload.quarantined_count} held` : ''
+          }`,
         });
         setUploadResult(data.upload);
         setSelectedFile(null);
@@ -209,7 +303,13 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
         if (data.snapshot) {
           onSnapshotUpdate(data.snapshot);
         }
+        void loadDocumentPreview(data.upload.doc_id);
       } else {
+        updateUploadBatch(batchId, {
+          status: 'vectorizing',
+          progress: 65,
+          detail: 'Segmenting sections & vectorizing to Qdrant...',
+        });
         const { data } = await safeFetchJson<{
           upload: UploadDocumentResult;
           snapshot?: LedgerSnapshot;
@@ -225,15 +325,29 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
             raw_text: rawText,
           }),
         });
+        updateUploadBatch(batchId, {
+          status: 'success',
+          progress: 100,
+          detail: `${data.upload.parent_chunks_created} sec · ${data.upload.child_chunks_indexed} vec${
+            data.upload.quarantined_count > 0 ? ` · ${data.upload.quarantined_count} held` : ''
+          }`,
+        });
         setUploadResult(data.upload);
         setSelectedFile(null);
         setPreviewNote(null);
         if (data.snapshot) {
           onSnapshotUpdate(data.snapshot);
         }
+        void loadDocumentPreview(data.upload.doc_id);
       }
     } catch (err) {
-      setUploadError(err instanceof Error ? err.message : 'Upload failed.');
+      const msg = err instanceof Error ? err.message : 'Upload failed.';
+      updateUploadBatch(batchId, {
+        status: 'failed',
+        progress: 100,
+        detail: msg,
+      });
+      setUploadError(msg);
     } finally {
       setUploading(false);
     }
@@ -252,6 +366,63 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
     }
   };
 
+  const handleClearSamples = async () => {
+    setCorpusActionBusy(true);
+    setUploadError(null);
+    setUploadResult(null);
+    try {
+      const { data } = await safeFetchJson<{ snapshot?: LedgerSnapshot }>('/api/admin/clear-samples', {
+        method: 'POST',
+      });
+      if (data.snapshot) onSnapshotUpdate(data.snapshot);
+      setSelectedPreviewDocId(null);
+      setPreviewData(null);
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : 'Unable to clear library.');
+    } finally {
+      setCorpusActionBusy(false);
+    }
+  };
+
+  const handleRestoreCorpus = async () => {
+    setCorpusActionBusy(true);
+    setUploadError(null);
+    setUploadResult(null);
+    try {
+      const { data } = await safeFetchJson<{ snapshot?: LedgerSnapshot }>('/api/admin/reset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ empty: false }),
+      });
+      if (data.snapshot) onSnapshotUpdate(data.snapshot);
+      setSelectedPreviewDocId(null);
+      setPreviewData(null);
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : 'Unable to restore starter corpus.');
+    } finally {
+      setCorpusActionBusy(false);
+    }
+  };
+
+  const handleDeleteDocument = async (docId: string) => {
+    setDeletingDocId(docId);
+    try {
+      const { data } = await safeFetchJson<{ snapshot?: LedgerSnapshot }>(
+        `/api/admin/documents/${encodeURIComponent(docId)}`,
+        { method: 'DELETE' }
+      );
+      if (data.snapshot) onSnapshotUpdate(data.snapshot);
+      if (selectedPreviewDocId === docId) {
+        setSelectedPreviewDocId(null);
+        setPreviewData(null);
+      }
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : 'Unable to delete document.');
+    } finally {
+      setDeletingDocId(null);
+    }
+  };
+
   const pypdfLines = extractionExhibit.pypdf_garbled.split('\n');
 
   return (
@@ -267,55 +438,286 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
               Policy Library &amp; Direct Qdrant Upload
             </h1>
             <p className="mt-1 text-sm text-slate-300 leading-relaxed">
-              Browse the full 1966–2026 banking &amp; compliance library or drop in any <strong>PDF, Word (.docx), CSV/TSV, HTML, JSON, RTF, Markdown, or TXT</strong> document—LexGate converts it automatically for Qdrant and checks every table.
+              Every document here — both the preloaded multi-page regulatory corpus and any <strong>PDF, Word (.docx), CSV/TSV, HTML, JSON, RTF, Markdown, or TXT</strong> file you upload — runs through the exact same page-by-page Parent/Child &amp; table-preserving Qdrant indexing pipeline.
             </p>
           </div>
-          <div className="text-xs text-right">
-            <div className="text-slate-400">Vector Store Target</div>
-            <div className={`font-semibold mt-0.5 ${runtime?.qdrant.reachable ? 'text-emerald-400' : 'text-blue-300'}`}>
-              {runtime?.qdrant.reachable
-                ? `Live Qdrant (${runtime.qdrant.collection})`
-                : 'Embedded Vector Index (Auto-Qdrant on Local Clone)'}
+          <div className="flex flex-col items-end gap-2 text-xs text-right">
+            <div>
+              <div className="text-slate-400">Vector Store Target</div>
+              <div className={`font-semibold mt-0.5 ${runtime?.qdrant.reachable ? 'text-emerald-400' : 'text-blue-300'}`}>
+                {runtime?.qdrant.reachable
+                  ? `Live Qdrant (${runtime.qdrant.collection})`
+                  : 'Embedded Vector Index (Auto-Qdrant on Local Clone)'}
+              </div>
             </div>
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setIsDbStatusOpen(true)}
+                aria-label="Open Database Status Info"
+                title="View LexGate data architecture, ingestion, sectioning, and vectorization info"
+                className="inline-flex items-center gap-1.5 px-3 py-1 text-[11px] font-semibold text-white bg-blue-600 hover:bg-blue-500 border border-blue-400/50 rounded-md transition-colors whitespace-nowrap"
+              >
+                <Info className="w-3.5 h-3.5" />
+                Database Status Info
+              </button>
+              {snapshot.documents.length > 0 && (
+                <button
+                  type="button"
+                  disabled={corpusActionBusy}
+                  onClick={() => void handleClearSamples()}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-600 rounded-md transition-colors disabled:opacity-50 whitespace-nowrap"
+                >
+                  <Trash2 className="w-3 h-3" />
+                  Clear Library (My Docs Only)
+                </button>
+              )}
+              <button
+                type="button"
+                disabled={corpusActionBusy}
+                onClick={() => void handleRestoreCorpus()}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium text-blue-200 bg-slate-800 hover:bg-slate-700 border border-slate-600 rounded-md transition-colors disabled:opacity-50 whitespace-nowrap"
+              >
+                <RotateCcw className="w-3 h-3" />
+                Restore Starter Corpus
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Real-Time Upload & Vectorization Progress Indicator */}
+        {(() => {
+          const latestBatch = uploadBatches[0] ?? null;
+          return (
+            <div
+              aria-live="polite"
+              className="p-3 rounded-lg bg-slate-900/80 border border-slate-700/80 flex flex-wrap items-center justify-between gap-3 text-xs"
+            >
+              <div className="flex items-center gap-3 min-w-0 flex-1">
+                {!latestBatch ? (
+                  <div className="flex items-center gap-2 text-slate-300">
+                    <CheckCircle2 className="w-4 h-4 text-slate-400 shrink-0" />
+                    <span className="font-medium text-white">Upload &amp; Vectorization Status:</span>
+                    <span className="text-slate-400">
+                      Ready — submit a file or policy text below to track live upload &amp; Qdrant batch status.
+                    </span>
+                  </div>
+                ) : (
+                  <div className="min-w-0 flex-1 space-y-1.5">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {latestBatch.status === 'uploading' || latestBatch.status === 'vectorizing' ? (
+                        <Loader2 className="w-4 h-4 text-blue-400 animate-spin shrink-0" />
+                      ) : latestBatch.status === 'success' ? (
+                        <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                      ) : (
+                        <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                      )}
+                      <span
+                        className={`font-semibold whitespace-nowrap ${
+                          latestBatch.status === 'success'
+                            ? 'text-emerald-300'
+                            : latestBatch.status === 'failed'
+                              ? 'text-rose-300'
+                              : 'text-blue-300'
+                        }`}
+                      >
+                        {latestBatch.status === 'success'
+                          ? 'Success'
+                          : latestBatch.status === 'failed'
+                            ? 'Failed'
+                            : latestBatch.status === 'uploading'
+                              ? 'Uploading'
+                              : 'Vectorizing'}
+                      </span>
+                      <span className="text-slate-200 font-medium truncate max-w-xs">
+                        Batch #{latestBatch.batch_number}: {latestBatch.label}
+                      </span>
+                      <span className="text-slate-400 font-mono tabular-nums text-[11px] truncate">
+                        {latestBatch.detail} ({latestBatch.progress}%)
+                      </span>
+                    </div>
+                    <div className="h-1.5 w-full max-w-md bg-slate-800 rounded-full overflow-hidden">
+                      <div
+                        style={{ width: `${latestBatch.progress}%` }}
+                        className={`h-full transition-all duration-200 ${
+                          latestBatch.status === 'failed'
+                            ? 'bg-rose-500'
+                            : latestBatch.status === 'success'
+                              ? 'bg-emerald-500'
+                              : 'bg-blue-500'
+                        }`}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {uploadBatches.length > 0 && (
+                <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono tabular-nums">
+                  {uploadBatches.slice(0, 4).map((b) => (
+                    <span
+                      key={b.batch_id}
+                      title={`${b.label}: ${b.detail}`}
+                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border ${
+                        b.status === 'success'
+                          ? 'bg-emerald-950/60 border-emerald-700/70 text-emerald-300'
+                          : b.status === 'failed'
+                            ? 'bg-rose-950/60 border-rose-700/70 text-rose-300'
+                            : 'bg-blue-950/60 border-blue-700/70 text-blue-200'
+                      }`}
+                    >
+                      <span>#{b.batch_number}</span>
+                      <span>
+                        {b.status === 'success'
+                          ? 'Success'
+                          : b.status === 'failed'
+                            ? 'Failed'
+                            : `${b.progress}%`}
+                      </span>
+                    </span>
+                  ))}
+                  {!uploading && (
+                    <button
+                      type="button"
+                      onClick={() => setUploadBatches([])}
+                      className="text-slate-400 hover:text-white font-sans underline underline-offset-2 ml-1"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
+        {/* Header Search Bar */}
+        <div className="flex flex-wrap items-center justify-between gap-3 pt-4 border-t border-slate-700/70">
+          <div className="relative flex-1 min-w-[260px] max-w-xl">
+            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <input
+              type="text"
+              value={searchFilter}
+              onChange={(e) => setSearchFilter(e.target.value)}
+              aria-label="Filter policy documents by title or date"
+              placeholder="Search uploaded & starter policies by title, code, or date (e.g. 2026, 2025-02)..."
+              className="w-full pl-9 pr-8 py-2 text-xs bg-slate-900/90 border border-slate-600/80 rounded-lg text-white placeholder:text-slate-400 focus:outline-none focus:border-blue-400 transition-colors"
+            />
+            {searchFilter && (
+              <button
+                type="button"
+                onClick={() => setSearchFilter('')}
+                aria-label="Clear policy search filter"
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white transition-colors"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+          <div className="flex items-center gap-3 text-[11px] font-mono tabular-nums text-slate-300">
+            <span>
+              Showing {filteredDocuments.length} of {snapshot.documents.length} policy document
+              {snapshot.documents.length === 1 ? '' : 's'}
+            </span>
+            {searchFilter.trim() && (
+              <button
+                type="button"
+                onClick={() => catalogSectionRef.current?.scrollIntoView({ behavior: 'smooth' })}
+                className="inline-flex items-center gap-1 px-2.5 py-1 font-sans text-[11px] font-medium text-blue-200 bg-slate-800 hover:bg-slate-700 border border-slate-600 rounded-md transition-colors whitespace-nowrap"
+              >
+                Jump to Catalog
+                <ArrowRight className="w-3 h-3" />
+              </button>
+            )}
           </div>
         </div>
 
         <div className="grid grid-cols-2 sm:grid-cols-5 gap-4 pt-4 border-t border-slate-700/70">
-          <div>
-            <div className="text-[11px] text-slate-400">Policy Documents</div>
+          <button
+            type="button"
+            onClick={() => setIsDbStatusOpen(true)}
+            className="text-left p-2 -m-2 rounded-lg hover:bg-white/5 transition-colors group"
+          >
+            <div className="text-[11px] text-slate-400 flex items-center gap-1">
+              Policy Documents
+              <Info className="w-3 h-3 text-slate-500 group-hover:text-blue-300 transition-colors" />
+            </div>
             <div className="mt-0.5 text-lg font-semibold font-mono tabular-nums text-white">
               {snapshot.stats.document_count}
             </div>
-          </div>
-          <div>
-            <div className="text-[11px] text-slate-400">Rule Versions</div>
+            <div className="text-[10px] font-mono tabular-nums text-slate-400">
+              {snapshot.stats.starter_document_count} starter · {snapshot.stats.user_document_count} uploaded
+            </div>
+          </button>
+          <button
+            type="button"
+            onClick={() => setIsDbStatusOpen(true)}
+            className="text-left p-2 -m-2 rounded-lg hover:bg-white/5 transition-colors group"
+          >
+            <div className="text-[11px] text-slate-400 flex items-center gap-1">
+              Rule Versions
+              <Info className="w-3 h-3 text-slate-500 group-hover:text-blue-300 transition-colors" />
+            </div>
             <div className="mt-0.5 text-lg font-semibold font-mono tabular-nums text-white">
               {snapshot.stats.version_count}
             </div>
-          </div>
-          <div>
-            <div className="text-[11px] text-slate-400">Full Sections (Parent)</div>
+            <div className="text-[10px] font-mono tabular-nums text-slate-400">
+              {snapshot.stats.starter_version_count} starter · {snapshot.stats.user_version_count} uploaded
+            </div>
+          </button>
+          <button
+            type="button"
+            onClick={() => setIsDbStatusOpen(true)}
+            className="text-left p-2 -m-2 rounded-lg hover:bg-white/5 transition-colors group"
+          >
+            <div className="text-[11px] text-slate-400 flex items-center gap-1">
+              Full Sections (Parent)
+              <Info className="w-3 h-3 text-slate-500 group-hover:text-blue-300 transition-colors" />
+            </div>
             <div className="mt-0.5 text-lg font-semibold font-mono tabular-nums text-white">
               {snapshot.stats.parent_chunk_count}
             </div>
-          </div>
-          <div>
-            <div className="text-[11px] text-slate-400">Qdrant Vector Points</div>
+            <div className="text-[10px] font-mono tabular-nums text-slate-400">
+              {snapshot.stats.starter_parent_chunk_count} starter · {snapshot.stats.user_parent_chunk_count} uploaded
+            </div>
+          </button>
+          <button
+            type="button"
+            onClick={() => setIsDbStatusOpen(true)}
+            className="text-left p-2 -m-2 rounded-lg hover:bg-white/5 transition-colors group"
+          >
+            <div className="text-[11px] text-slate-400 flex items-center gap-1">
+              Qdrant Vector Points
+              <Info className="w-3 h-3 text-slate-500 group-hover:text-emerald-300 transition-colors" />
+            </div>
             <div className="mt-0.5 text-lg font-semibold font-mono tabular-nums text-emerald-400">
               {snapshot.stats.qdrant_point_count}
             </div>
-          </div>
-          <div>
-            <div className="text-[11px] text-slate-400">Safety Hold Items</div>
+            <div className="text-[10px] font-mono tabular-nums text-slate-400">
+              {snapshot.stats.starter_vector_point_count} starter · {snapshot.stats.user_vector_point_count} uploaded
+            </div>
+          </button>
+          <button
+            type="button"
+            onClick={() => setIsDbStatusOpen(true)}
+            className="text-left p-2 -m-2 rounded-lg hover:bg-white/5 transition-colors group"
+          >
+            <div className="text-[11px] text-slate-400 flex items-center gap-1">
+              Safety Hold Items
+              <Info className="w-3 h-3 text-slate-500 group-hover:text-amber-300 transition-colors" />
+            </div>
             <div className="mt-0.5 text-lg font-semibold font-mono tabular-nums text-amber-300">
               {snapshot.stats.quarantine_count}
             </div>
-          </div>
+            <div className="text-[10px] font-mono tabular-nums text-slate-400">
+              {snapshot.stats.starter_quarantine_count} starter · {snapshot.stats.user_quarantine_count} uploaded
+            </div>
+          </button>
         </div>
       </section>
 
       {/* 2. Simple Multi-Format Upload -> Auto-Process -> Qdrant */}
-      <section className="saas-surface rounded-xl overflow-hidden">
+      <section ref={uploadSectionRef} className="saas-surface rounded-xl overflow-hidden">
         <div className="px-6 py-4 bg-slate-900 text-white border-b border-slate-800 flex flex-wrap items-center justify-between gap-3">
           <div>
             <h2 className="text-base font-semibold flex items-center gap-2">
@@ -605,15 +1007,25 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
         </form>
       </section>
 
-      {/* 3. Full Searchable Policy Library Catalog */}
-      <section className="saas-surface rounded-xl overflow-hidden">
+      {/* 3. Document History & Bitemporal Version Lineage Visualization */}
+      <DocumentHistoryViz
+        snapshot={snapshot}
+        searchQuery={searchFilter}
+        corpusActionBusy={corpusActionBusy}
+        onRestoreCorpus={() => void handleRestoreCorpus()}
+        onDeleteDocument={(docId) => void handleDeleteDocument(docId)}
+        onJumpToUpload={() => uploadSectionRef.current?.scrollIntoView({ behavior: 'smooth' })}
+      />
+
+      {/* 4. Full Searchable Policy Library Catalog */}
+      <section ref={catalogSectionRef} className="saas-surface rounded-xl overflow-hidden">
         <div className="px-6 py-4 bg-slate-100/90 border-b border-slate-200 flex flex-wrap items-center justify-between gap-4">
           <div>
             <h2 className="text-lg font-semibold text-slate-950">
               Active Regulatory &amp; Policy Catalog ({filteredDocuments.length} of {snapshot.documents.length})
             </h2>
             <p className="mt-0.5 text-xs text-slate-600">
-              Covers 1966–2026 statutes, Banking Amendment Act 2025, ODPC Data Protection, CBK Cyber &amp; AI Governance 2026, AML/VASP, IFRS 9, and Internal Audit.
+              Multi-page Parent sections and focused Child Qdrant vector points generated identically for starter laws and live uploads.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -623,9 +1035,19 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
                 type="text"
                 value={searchFilter}
                 onChange={(e) => setSearchFilter(e.target.value)}
-                placeholder="Filter by title or code..."
-                className="pl-8 pr-3 py-1.5 text-xs bg-white border border-slate-300 rounded-lg text-slate-900 focus:outline-none focus:border-blue-700"
+                placeholder="Filter by title, code, or date..."
+                className="pl-8 pr-7 py-1.5 text-xs bg-white border border-slate-300 rounded-lg text-slate-900 focus:outline-none focus:border-blue-700"
               />
+              {searchFilter && (
+                <button
+                  type="button"
+                  onClick={() => setSearchFilter('')}
+                  aria-label="Clear filter"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              )}
             </div>
             <select
               value={tierFilter}
@@ -647,36 +1069,298 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
                 <th className="py-2.5 px-4 font-semibold">Policy Title</th>
                 <th className="py-2.5 px-4 font-semibold">Code</th>
                 <th className="py-2.5 px-4 font-semibold">Access Level</th>
+                <th className="py-2.5 px-4 font-semibold">Indexed Content</th>
                 <th className="py-2.5 px-4 font-semibold">Effective Timeline(s)</th>
                 <th className="py-2.5 px-4 font-semibold">Qdrant Sync</th>
+                <th className="py-2.5 px-4 font-semibold text-right">Action</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-200 bg-white">
-              {filteredDocuments.map((doc) => (
-                <tr key={doc.doc_id} className="hover:bg-slate-50/80 transition-colors">
-                  <td className="py-3 px-4 font-medium text-slate-950">{doc.title}</td>
-                  <td className="py-3 px-4 font-mono text-slate-700 whitespace-nowrap">{doc.citation_code}</td>
-                  <td className="py-3 px-4 text-slate-700 whitespace-nowrap">
-                    {SENSITIVITY_LABELS[doc.sensitivity]}
-                  </td>
-                  <td className="py-3 px-4 font-mono text-[11px] text-slate-600">
-                    {doc.versions.map((v) => (
-                      <div key={v.version_id}>
-                        {v.version_label} ({v.effective_from.slice(0, 10)} → {v.effective_to ? v.effective_to.slice(0, 10) : 'Present'})
-                      </div>
-                    ))}
-                  </td>
-                  <td className="py-3 px-4 whitespace-nowrap font-semibold">
-                    {doc.acl_in_sync ? (
-                      <span className="text-emerald-700">Synced</span>
-                    ) : (
-                      <span className="text-amber-700">Pending Sync</span>
-                    )}
+              {filteredDocuments.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="py-8 px-4 text-center text-xs text-slate-500">
+                    {snapshot.documents.length === 0
+                      ? 'Library is currently empty. Drop your own PDF, DOCX, CSV, HTML, JSON, RTF, or TXT file above to index real documents from scratch — or click "Restore Starter Corpus".'
+                      : 'No policies match your current search or access tier filter.'}
                   </td>
                 </tr>
-              ))}
+              ) : (
+                filteredDocuments.map((doc) => {
+                  const isPreviewSelected = selectedPreviewDocId === doc.doc_id;
+                  return (
+                    <tr
+                      key={doc.doc_id}
+                      onClick={() => void loadDocumentPreview(doc.doc_id, undefined, true)}
+                      className={`cursor-pointer transition-colors ${
+                        isPreviewSelected ? 'bg-blue-50/85' : 'hover:bg-slate-50/80'
+                      }`}
+                    >
+                      <td className="py-3 px-4">
+                        <div className="font-medium text-slate-950 flex items-center gap-2">
+                          <span>{doc.title}</span>
+                          {isPreviewSelected && (
+                            <span className="text-[10px] font-semibold text-blue-700">
+                              Previewing Page 1
+                            </span>
+                          )}
+                        </div>
+                        <div className="mt-0.5 text-[11px] text-slate-500">
+                          <span
+                            className={
+                              doc.origin === 'user_upload'
+                                ? 'text-blue-700 font-semibold'
+                                : 'text-slate-600'
+                            }
+                          >
+                            {doc.origin === 'user_upload' ? 'Live User Upload' : 'Starter Corpus'}
+                          </span>
+                          <span aria-hidden="true"> · </span>
+                          <span>Indexed {doc.created_at.slice(0, 10)}</span>
+                        </div>
+                      </td>
+                      <td className="py-3 px-4 font-mono text-slate-700 whitespace-nowrap">{doc.citation_code}</td>
+                      <td className="py-3 px-4 text-slate-700 whitespace-nowrap">
+                        {SENSITIVITY_LABELS[doc.sensitivity]}
+                      </td>
+                      <td className="py-3 px-4 font-mono text-[11px] text-slate-700 whitespace-nowrap">
+                        {doc.parent_section_count} section{doc.parent_section_count === 1 ? '' : 's'} · {doc.vector_point_count} vector{doc.vector_point_count === 1 ? '' : 's'}
+                      </td>
+                      <td className="py-3 px-4 font-mono text-[11px] text-slate-600">
+                        {doc.versions.map((v) => (
+                          <div key={v.version_id}>
+                            {v.version_label} ({v.effective_from.slice(0, 10)} → {v.effective_to ? v.effective_to.slice(0, 10) : 'Present'})
+                          </div>
+                        ))}
+                      </td>
+                      <td className="py-3 px-4 whitespace-nowrap font-semibold">
+                        {doc.acl_in_sync ? (
+                          <span className="text-emerald-700">Synced</span>
+                        ) : (
+                          <span className="text-amber-700">Pending Sync</span>
+                        )}
+                      </td>
+                      <td className="py-3 px-4 text-right whitespace-nowrap">
+                        <div className="inline-flex items-center justify-end gap-1.5">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void loadDocumentPreview(doc.doc_id, undefined, true);
+                            }}
+                            title="Preview first page of ingested content"
+                            className={`inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium rounded transition-colors ${
+                              isPreviewSelected
+                                ? 'text-white bg-blue-700'
+                                : 'text-blue-700 hover:bg-blue-50'
+                            }`}
+                          >
+                            <Eye className="w-3.5 h-3.5" />
+                            {isPreviewSelected ? 'Previewing' : 'Preview'}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={deletingDocId === doc.doc_id}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void handleDeleteDocument(doc.doc_id);
+                            }}
+                            title="Remove document and its Qdrant vectors"
+                            className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-slate-600 hover:text-rose-700 hover:bg-rose-50 rounded transition-colors disabled:opacity-50"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            Remove
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
             </tbody>
           </table>
+        </div>
+
+        {/* Document First-Page Preview Pane */}
+        <div ref={previewPaneRef} className="border-t border-slate-200 bg-slate-50/90 p-6">
+          {!selectedPreviewDocId ? (
+            <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-slate-600">
+              <div className="flex items-center gap-2.5">
+                <Eye className="w-4 h-4 text-blue-700 shrink-0" />
+                <span>
+                  <strong>First-Page Ingestion Preview:</strong> Click any policy document row in the list above to inspect its extracted Page 1 content and verify ingestion accuracy.
+                </span>
+              </div>
+              {filteredDocuments.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => void loadDocumentPreview(filteredDocuments[0].doc_id)}
+                  className="px-3 py-1.5 text-xs font-medium text-blue-800 bg-white hover:bg-blue-50 border border-blue-200 rounded-md transition-colors whitespace-nowrap"
+                >
+                  Preview Top Document
+                </button>
+              )}
+            </div>
+          ) : previewLoading ? (
+            <div className="py-6 text-center text-xs text-slate-600">
+              Loading first-page preview from the ledger...
+            </div>
+          ) : previewError ? (
+            <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-lg text-xs text-rose-900">
+              <strong>Preview failed:</strong> {previewError}
+            </div>
+          ) : previewData ? (
+            <div className="space-y-4">
+              {/* Preview Header */}
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div>
+                  <div className="text-[11px] text-slate-500 flex flex-wrap items-center gap-1.5">
+                    <span className="font-semibold text-blue-700">First-Page Ingestion Preview</span>
+                    <span aria-hidden="true">·</span>
+                    <span className="font-mono">{previewData.citation_code}</span>
+                    <span aria-hidden="true">·</span>
+                    <span>
+                      {previewData.origin === 'user_upload' ? 'Live User Upload' : 'Starter Corpus'}
+                    </span>
+                    <span aria-hidden="true">·</span>
+                    <span className="font-mono tabular-nums">
+                      {previewData.preview_page_number !== null
+                        ? `Page ${previewData.preview_page_number} of ${previewData.total_pages_indexed} indexed page${previewData.total_pages_indexed === 1 ? '' : 's'}`
+                        : '0 indexed pages'}
+                    </span>
+                  </div>
+                  <h3 className="text-sm font-semibold text-slate-950 mt-0.5">
+                    {previewData.title}
+                  </h3>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  {previewData.available_versions.length > 1 && (
+                    <select
+                      aria-label="Select rule version to preview"
+                      value={previewData.version_id}
+                      onChange={(e) =>
+                        void loadDocumentPreview(previewData.doc_id, e.target.value)
+                      }
+                      className="px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-md text-slate-900 focus:outline-none focus:border-blue-700"
+                    >
+                      {previewData.available_versions.map((v) => (
+                        <option key={v.version_id} value={v.version_id}>
+                          {v.version_label}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+
+                  <div className="flex items-center gap-1 p-1 bg-slate-200/80 rounded-lg">
+                    <button
+                      type="button"
+                      onClick={() => setPreviewTab('page')}
+                      className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+                        previewTab === 'page'
+                          ? 'bg-slate-900 text-white'
+                          : 'text-slate-700 hover:text-slate-950'
+                      }`}
+                    >
+                      Page {previewData.preview_page_number ?? 1} Full Text ({previewData.parent_sections.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPreviewTab('vectors')}
+                      className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+                        previewTab === 'vectors'
+                          ? 'bg-slate-900 text-white'
+                          : 'text-slate-700 hover:text-slate-950'
+                      }`}
+                    >
+                      Qdrant Vector Chunks ({previewData.child_vectors.length})
+                    </button>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedPreviewDocId(null);
+                      setPreviewData(null);
+                    }}
+                    aria-label="Close document preview"
+                    className="p-1.5 text-slate-500 hover:text-slate-900 bg-white border border-slate-300 rounded-md transition-colors"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Safety Hold alert if doc has quarantined items */}
+              {previewData.quarantined_items.length > 0 && (
+                <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-950">
+                  <strong>Safety Hold Notice:</strong> {previewData.quarantined_items.length} block(s) from this document were quarantined (
+                  {previewData.quarantined_items
+                    .map((q) => `Page ${q.page_number ?? 'N/A'}: ${REASON_LABELS[q.reason_code] ?? q.reason_code}`)
+                    .join(', ')}
+                  ) and excluded from Qdrant indexing.
+                </div>
+              )}
+
+              {/* Preview Body */}
+              {previewTab === 'page' ? (
+                previewData.parent_sections.length === 0 ? (
+                  <div className="p-5 bg-white border border-slate-200 rounded-lg text-xs text-slate-600">
+                    No clean parent sections were indexed for this version (check Safety Hold above).
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {previewData.parent_sections.map((sec, idx) => (
+                      <div
+                        key={sec.chunk_id}
+                        className="p-5 bg-white border border-slate-200 rounded-lg space-y-2.5 shadow-2xs"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500 pb-2 border-b border-slate-100">
+                          <span className="font-semibold text-slate-900">
+                            Page {previewData.preview_page_number} · Full Section {idx + 1} (Parent)
+                          </span>
+                          <span className="font-mono tabular-nums">
+                            {sec.kind === 'table' ? 'Structured Table' : 'Prose'} ·{' '}
+                            {sec.token_count} tokens · {(sec.ocr_confidence * 100).toFixed(0)}% OCR clarity
+                          </span>
+                        </div>
+                        <div className="text-xs sm:text-[13px] text-slate-900 leading-relaxed whitespace-pre-wrap font-sans">
+                          {sec.text_content}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )
+              ) : previewData.child_vectors.length === 0 ? (
+                <div className="p-5 bg-white border border-slate-200 rounded-lg text-xs text-slate-600">
+                  No Qdrant child vectors indexed for Page {previewData.preview_page_number ?? 1}.
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {previewData.child_vectors.map((vec, idx) => (
+                    <div
+                      key={vec.chunk_id}
+                      className="p-4 bg-white border border-slate-200 rounded-lg space-y-2"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] pb-1.5 border-b border-slate-100">
+                        <span className="font-semibold text-slate-900">
+                          Vector Chunk {idx + 1} (Child)
+                        </span>
+                        <span className="font-mono tabular-nums text-slate-600">
+                          {vec.kind === 'table' ? 'Table Slice' : 'Prose'} · {vec.token_count} tok ·{' '}
+                          <span className={vec.in_qdrant ? 'text-emerald-700 font-semibold' : 'text-amber-700'}>
+                            {vec.in_qdrant ? 'In Qdrant' : 'Pending'}
+                          </span>
+                        </span>
+                      </div>
+                      <pre className="text-[11px] font-mono text-slate-800 whitespace-pre-wrap leading-relaxed">
+                        {vec.text_content}
+                      </pre>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : null}
         </div>
       </section>
 
@@ -847,27 +1531,43 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
           )}
 
           <div className="divide-y divide-slate-200 border border-slate-200 rounded-lg overflow-hidden">
-            {snapshot.quarantine.map((q) => (
-              <div key={q.quarantine_id} className="p-5 bg-white space-y-3">
-                <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-                  <div className="font-semibold text-slate-950">
-                    {q.doc_title} · <span className="font-mono font-normal text-slate-600">Page {q.page_number ?? 'N/A'}</span>
-                  </div>
-                  <div className="tabular-nums text-slate-600">
-                    <span className="text-rose-700 font-semibold">
-                      {REASON_LABELS[q.reason_code] ?? q.reason_code}
-                    </span>{' '}
-                    · Scan clarity {(q.ocr_confidence * 100).toFixed(0)}%
-                  </div>
-                </div>
-                <pre className="p-3.5 bg-[#091120] text-slate-200 rounded-lg text-[11px] font-mono overflow-x-auto">
-                  {JSON.stringify(q.raw_payload, null, 2)}
-                </pre>
+            {snapshot.quarantine.length === 0 ? (
+              <div className="p-6 bg-white text-center text-xs text-slate-500">
+                No quarantined items currently in Safety Hold. Upload a file with broken table columns (or click “Load Broken Table Test”) to see Safety Hold catch it cleanly.
               </div>
-            ))}
+            ) : (
+              snapshot.quarantine.map((q) => (
+                <div key={q.quarantine_id} className="p-5 bg-white space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <div className="font-semibold text-slate-950">
+                      {q.doc_title} · <span className="font-mono font-normal text-slate-600">Page {q.page_number ?? 'N/A'}</span>
+                    </div>
+                    <div className="tabular-nums text-slate-600">
+                      <span className="text-rose-700 font-semibold">
+                        {REASON_LABELS[q.reason_code] ?? q.reason_code}
+                      </span>{' '}
+                      · Scan clarity {(q.ocr_confidence * 100).toFixed(0)}%
+                    </div>
+                  </div>
+                  <pre className="p-3.5 bg-[#091120] text-slate-200 rounded-lg text-[11px] font-mono overflow-x-auto">
+                    {JSON.stringify(q.raw_payload, null, 2)}
+                  </pre>
+                </div>
+              ))
+            )}
           </div>
         </div>
       </section>
+
+      <DatabaseStatusModal
+        isOpen={isDbStatusOpen}
+        onClose={() => setIsDbStatusOpen(false)}
+        snapshot={snapshot}
+        runtime={runtime}
+        corpusActionBusy={corpusActionBusy}
+        onClearSamples={() => void handleClearSamples()}
+        onRestoreCorpus={() => void handleRestoreCorpus()}
+      />
     </div>
   );
 };

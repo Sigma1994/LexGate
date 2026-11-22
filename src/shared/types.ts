@@ -222,16 +222,26 @@ export interface SmokeEvalVariantRow {
   avg_latency_ms: number;
 }
 
+export interface DocumentVersionWithStats extends DocumentVersion {
+  parent_section_count: number;
+  vector_point_count: number;
+  pages_count: number;
+}
+
 export interface LedgerSnapshot {
   corpus_epoch: number;
   index_worker_paused: boolean;
   principals: Array<Principal & { active_groups_now: GroupId[]; memberships: GroupMembership[] }>;
   documents: Array<
     RegulatoryDocument & {
+      origin: 'starter' | 'user_upload';
       postgres_acl_groups: GroupId[];
       qdrant_acl_groups: GroupId[];
       acl_in_sync: boolean;
-      versions: DocumentVersion[];
+      parent_section_count: number;
+      vector_point_count: number;
+      quarantine_count: number;
+      versions: DocumentVersionWithStats[];
     }
   >;
   outbox: OutboxEntry[];
@@ -245,6 +255,16 @@ export interface LedgerSnapshot {
     child_chunk_count: number;
     qdrant_point_count: number;
     quarantine_count: number;
+    starter_document_count: number;
+    starter_version_count: number;
+    starter_parent_chunk_count: number;
+    starter_vector_point_count: number;
+    starter_quarantine_count: number;
+    user_document_count: number;
+    user_version_count: number;
+    user_parent_chunk_count: number;
+    user_vector_point_count: number;
+    user_quarantine_count: number;
   };
 }
 
@@ -345,3 +365,43 @@ export interface PipelineInspectResponse {
   llm_system_prompt: string;
   llm_evidence_prompt_preview: string;
 }
+
+export interface DocumentFirstPagePreview {
+  doc_id: string;
+  title: string;
+  citation_code: string;
+  origin: 'starter' | 'user_upload';
+  sensitivity: GroupId;
+  version_id: string;
+  version_label: string;
+  effective_from: string;
+  effective_to: string | null;
+  available_versions: Array<{
+    version_id: string;
+    version_label: string;
+    effective_from: string;
+    effective_to: string | null;
+  }>;
+  total_pages_indexed: number;
+  preview_page_number: number | null;
+  parent_sections: Array<{
+    chunk_id: string;
+    kind: 'text' | 'table';
+    ocr_confidence: number;
+    token_count: number;
+    text_content: string;
+  }>;
+  child_vectors: Array<{
+    chunk_id: string;
+    kind: 'text' | 'table';
+    token_count: number;
+    text_content: string;
+    in_qdrant: boolean;
+  }>;
+  quarantined_items: Array<{
+    quarantine_id: string;
+    page_number: number | null;
+    reason_code: QuarantineReasonCode;
+  }>;
+}
+

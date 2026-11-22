@@ -231,7 +231,8 @@ export function runVerificationSuite(baseLedger: RegulatoryLedger): Verification
   // 8. Two-User ACL Differential
   {
     const t0 = performance.now();
-    const l = baseLedger.clone();
+    const hasSeedAudit = baseLedger.documents.some((d) => d.doc_id === docAudit);
+    const l = hasSeedAudit ? baseLedger.clone() : new RegulatoryLedger();
     const asOf = new Date('2026-11-20T00:00:00Z').getTime();
     const auditHits = l
       .qdrantHybridSearch('nostro suspense 412.6 million reserve buffer', l.currentPrincipalGroups(pAudit), asOf)

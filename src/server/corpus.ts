@@ -1,3 +1,4 @@
+import { chunkDocumentPages, type PageInput } from './chunker.ts';
 import type {
   DocumentChunk,
   DocumentVersion,
@@ -357,358 +358,311 @@ export const SEED_VERSIONS: DocumentVersion[] = [
   },
 ];
 
-export const SEED_CHUNKS: DocumentChunk[] = [
-  // Cap 491 (1966) Parent & Child
-  {
-    chunk_id: '44444444-4444-4444-8444-444444444401',
-    version_id: '33333333-3333-4333-8333-333333333301',
-    parent_chunk_id: null,
-    chunk_tier: 'parent',
-    kind: 'text',
-    page_number: 4,
-    ocr_confidence: 0.96,
-    text_content:
-      'Section 4 (1966 Original Enactment): The principal object of the Bank shall be to regulate the issue of notes and coins, to assist in the development and maintenance of a sound monetary, credit and banking system in Kenya conducive to the orderly and balanced economic development of the country and the external stability of the currency. Authorized capital at commencement is fixed at twenty-six million shillings.',
-    token_count: 82,
-    keywords: ['central bank', '1966', 'cap 491', 'principal object', 'capital', 'twenty-six million', 'shillings', 'currency'],
-  },
-  {
-    chunk_id: '44444444-4444-4444-8444-444444444402',
-    version_id: '33333333-3333-4333-8333-333333333301',
-    parent_chunk_id: '44444444-4444-4444-8444-444444444401',
-    chunk_tier: 'child',
-    kind: 'text',
-    page_number: 4,
-    ocr_confidence: 0.96,
-    text_content:
-      'Section 4 (1966): The principal object of the Bank shall be to regulate notes and coins and maintain monetary stability. Authorized capital at commencement is twenty-six million shillings.',
-    token_count: 34,
-    keywords: ['central bank', '1966', 'cap 491', 'principal object', 'authorized capital', 'twenty-six million', 'shillings'],
-  },
-  // Cap 491 (2012 Revised) Parent & Child
-  {
-    chunk_id: '44444444-4444-4444-8444-444444444403',
-    version_id: '33333333-3333-4333-8333-333333333302',
-    parent_chunk_id: null,
-    chunk_tier: 'parent',
-    kind: 'text',
-    page_number: 7,
-    ocr_confidence: 0.99,
-    text_content:
-      'Section 4 & Section 4A (2012 Revised Edition): The principal object of the Bank shall be to formulate and implement monetary policy directed to achieving and maintaining stability in the general level of prices. Under Section 4A, the Bank shall foster the liquidity, solvency and proper functioning of a stable market-based financial system and formulate and implement foreign exchange policy. Section 8 fixes authorized capital at five billion shillings.',
-    token_count: 88,
-    keywords: ['central bank', '2012', 'cap 491', 'price stability', 'monetary policy', 'liquidity', 'solvency', 'five billion', 'authorized capital'],
-  },
-  {
-    chunk_id: '44444444-4444-4444-8444-444444444404',
-    version_id: '33333333-3333-4333-8333-333333333302',
-    parent_chunk_id: '44444444-4444-4444-8444-444444444403',
-    chunk_tier: 'child',
-    kind: 'text',
-    page_number: 7,
-    ocr_confidence: 0.99,
-    text_content:
-      'Section 4 (2012): Formulate monetary policy for price stability; foster liquidity and solvency. Section 8 fixes authorized capital at five billion shillings.',
-    token_count: 28,
-    keywords: ['central bank', '2012', 'cap 491', 'price stability', 'five billion', 'authorized capital', 'monetary policy'],
-  },
-  // CBK/PG/03 (2013 v1) Parent & Child Table
-  {
-    chunk_id: '44444444-4444-4444-8444-444444444405',
-    version_id: '33333333-3333-4333-8333-333333333303',
-    parent_chunk_id: null,
-    chunk_tier: 'parent',
-    kind: 'table',
-    page_number: 12,
-    ocr_confidence: 0.94,
-    text_content:
-      'Section 3.2 Capital Adequacy Ratios (2013 Framework, effective 2013-01-01 to 2023-06-30):\n| Metric | Minimum Ratio | Capital Conservation Buffer | Total Requirement |\n|---|---|---|---|\n| Core Capital / Total Risk-Weighted Assets (TRWA) | 8.0% | 2.5% | 10.5% |\n| Total Capital / Total Risk-Weighted Assets (TRWA) | 12.0% | 2.5% | 14.5% |\n| Core Capital / Total Deposit Liabilities | 8.0% | N/A | 8.0% |\nMinimum absolute paid-up core capital for commercial banks under the 2013 schedule is KES 1.0 billion.',
-    token_count: 112,
-    keywords: ['capital adequacy', 'core capital', 'total capital', 'trwa', 'risk-weighted', '8.0%', '10.5%', '12.0%', '14.5%', '1.0 billion', '2013', 'cbk/pg/03'],
-  },
-  {
-    chunk_id: '44444444-4444-4444-8444-444444444406',
-    version_id: '33333333-3333-4333-8333-333333333303',
-    parent_chunk_id: '44444444-4444-4444-8444-444444444405',
-    chunk_tier: 'child',
-    kind: 'table',
-    page_number: 12,
-    ocr_confidence: 0.94,
-    text_content:
-      '| Metric | Minimum Ratio | Capital Conservation Buffer | Total Requirement |\n| Core Capital / TRWA | 8.0% | 2.5% | 10.5% |\n| Total Capital / TRWA | 12.0% | 2.5% | 14.5% |\nMinimum absolute core capital: KES 1.0 billion (2013 Framework).',
-    token_count: 58,
-    keywords: ['capital adequacy', 'core capital', 'total capital', 'trwa', '8.0%', '10.5%', '12.0%', '14.5%', '1.0 billion', 'cbk/pg/03'],
-  },
-  // CBK/PG/03 (2023 v2) Parent & Child Table
-  {
-    chunk_id: '44444444-4444-4444-8444-444444444407',
-    version_id: '33333333-3333-4333-8333-333333333304',
-    parent_chunk_id: null,
-    chunk_tier: 'parent',
-    kind: 'table',
-    page_number: 14,
-    ocr_confidence: 0.98,
-    text_content:
-      'Section 4.1 Revised Capital Adequacy & D-SIB Schedule (effective 2023-07-01, currently in force):\n| Metric | Minimum Ratio | Conservation Buffer | D-SIB Tier 1 Surcharge | Total D-SIB Requirement |\n|---|---|---|---|---|\n| Core Capital / TRWA | 8.0% | 2.5% | 1.5% | 12.0% |\n| Total Capital / TRWA | 12.0% | 2.5% | 1.5% | 16.0% |\n| Core Capital / Total Deposits | 8.0% | N/A | N/A | 8.0% |\nRevised statutory floor raises minimum core capital for commercial banks from KES 1.0 billion to KES 3.0 billion by December 2025 and KES 10.0 billion by December 2029.',
-    token_count: 126,
-    keywords: ['capital adequacy', 'd-sib', 'surcharge', 'core capital', 'total capital', 'trwa', '12.0%', '16.0%', '3.0 billion', '10.0 billion', '2023', 'cbk/pg/03'],
-  },
-  {
-    chunk_id: '44444444-4444-4444-8444-444444444408',
-    version_id: '33333333-3333-4333-8333-333333333304',
-    parent_chunk_id: '44444444-4444-4444-8444-444444444407',
-    chunk_tier: 'child',
-    kind: 'table',
-    page_number: 14,
-    ocr_confidence: 0.98,
-    text_content:
-      '| Metric | Minimum Ratio | Conservation Buffer | D-SIB Tier 1 Surcharge | Total D-SIB Requirement |\n| Core Capital / TRWA | 8.0% | 2.5% | 1.5% | 12.0% |\n| Total Capital / TRWA | 12.0% | 2.5% | 1.5% | 16.0% |\nMinimum core capital phases to KES 3.0B (2025) and KES 10.0B (2029).',
-    token_count: 68,
-    keywords: ['capital adequacy', 'd-sib', 'surcharge', '12.0%', '16.0%', '3.0 billion', '10.0 billion', 'cbk/pg/03'],
-  },
-  // Compliance Officer Restricted Circular (CBK/CIRC/11/2024)
-  {
-    chunk_id: '44444444-4444-4444-8444-444444444409',
-    version_id: '33333333-3333-4333-8333-333333333305',
-    parent_chunk_id: null,
-    chunk_tier: 'parent',
-    kind: 'table',
-    page_number: 3,
-    ocr_confidence: 0.97,
-    text_content:
-      'Circular 11/2024 Clause 2.4 — Statutory Liquidity & Stress Return Haircuts (Compliance Officer Tier):\n| Asset / Outflow Bucket | Statutory Minimum / Haircut | Reporting Frequency | Escalation Threshold |\n|---|---|---|---|\n| Statutory Liquidity Ratio | 20.0% of total deposit liabilities | Weekly (BSD-L1) | Alert below 22.0% |\n| 30-Day Liquidity Coverage Ratio (LCR) | 100.0% | Monthly (BSD-L2) | Alert below 105.0% |\n| Uninsured Corporate Deposit Run-Off Haircut | 40.0% stress outflow factor | Monthly | Board Risk Committee |\nInstitutions falling below 22.0% statutory liquidity must file an intraday cash-flow contingency notice within 24 hours.',
-    token_count: 118,
-    keywords: ['liquidity', 'stress', 'lcr', '20.0%', '22.0%', '100.0%', '40.0%', 'haircut', 'circular 11', 'bsd-l1', 'contingency'],
-  },
-  {
-    chunk_id: '44444444-4444-4444-8444-444444444410',
-    version_id: '33333333-3333-4333-8333-333333333305',
-    parent_chunk_id: '44444444-4444-4444-8444-444444444409',
-    chunk_tier: 'child',
-    kind: 'table',
-    page_number: 3,
-    ocr_confidence: 0.97,
-    text_content:
-      '| Asset / Outflow Bucket | Statutory Minimum / Haircut | Reporting Frequency | Escalation Threshold |\n| Statutory Liquidity Ratio | 20.0% | Weekly (BSD-L1) | Alert below 22.0% |\n| 30-Day LCR | 100.0% | Monthly (BSD-L2) | Alert below 105.0% |\n| Corporate Deposit Run-Off Haircut | 40.0% | Monthly | Board Risk Committee |',
-    token_count: 66,
-    keywords: ['liquidity', 'stress', 'lcr', '20.0%', '22.0%', '100.0%', '40.0%', 'haircut', 'circular 11'],
-  },
-  // Internal Audit Only Report (OAG/SAR/2025/04)
-  {
-    chunk_id: '44444444-4444-4444-8444-444444444411',
-    version_id: '33333333-3333-4333-8333-333333333306',
-    parent_chunk_id: null,
-    chunk_tier: 'parent',
-    kind: 'text',
-    page_number: 19,
-    ocr_confidence: 0.95,
-    text_content:
-      'Finding 4.2 (Internal Audit Tier Only) — Unreconciled Nostro Suspense & Reserve Buffer Variance: During Q3 FY 2024/25, internal audit sampling identified KES 412.6 million in aged nostro suspense items exceeding 30 days across three correspondent accounts, alongside a temporary 140 bps reserve buffer shortfall resolved within 48 hours via interbank repo.',
-    token_count: 72,
-    keywords: ['oag', 'special audit', 'nostro', 'suspense', '412.6 million', 'reserve buffer', '140 bps', 'shortfall', 'internal audit'],
-  },
-  {
-    chunk_id: '44444444-4444-4444-8444-444444444412',
-    version_id: '33333333-3333-4333-8333-333333333306',
-    parent_chunk_id: '44444444-4444-4444-8444-444444444411',
-    chunk_tier: 'child',
-    kind: 'text',
-    page_number: 19,
-    ocr_confidence: 0.95,
-    text_content:
-      'Finding 4.2: KES 412.6 million in aged nostro suspense items (>30 days) and a temporary 140 bps reserve buffer shortfall resolved in 48 hours.',
-    token_count: 30,
-    keywords: ['oag', 'special audit', 'nostro', 'suspense', '412.6 million', 'reserve buffer', '140 bps', 'shortfall'],
-  },
-  // Doc 5: Banking (Amendment) Act, 2025 — Staggered Core Capital Schedule
-  {
-    chunk_id: '44444444-4444-4444-8444-444444444413',
-    version_id: '33333333-3333-4333-8333-333333333307',
-    parent_chunk_id: null,
-    chunk_tier: 'parent',
-    kind: 'table',
-    page_number: 5,
-    ocr_confidence: 0.99,
-    text_content:
-      'Second Schedule — Staggered Minimum Core Capital Transition for Commercial Banks (Banking Amendment Act, 2025):\n| Compliance Milestone Date | Minimum Core Capital Required | Non-Compliance Daily Administrative Penalty |\n|---|---|---|\n| 31 December 2025 | KES 3.0 billion | KES 100,000 per day |\n| 31 December 2026 | KES 5.0 billion | KES 200,000 per day |\n| 31 December 2027 | KES 7.0 billion | KES 350,000 per day |\n| 31 December 2029 | KES 10.0 billion | License suspension review |\nBanks failing to submit a board-approved capital build-up plan within 90 days of enactment face dividend distribution restrictions under Section 18A.',
-    token_count: 116,
-    keywords: ['banking act', '2025', 'core capital', '3.0 billion', '5.0 billion', '7.0 billion', '10.0 billion', 'penalty', 'dividend', 'cap 488'],
-  },
-  {
-    chunk_id: '44444444-4444-4444-8444-444444444414',
-    version_id: '33333333-3333-4333-8333-333333333307',
-    parent_chunk_id: '44444444-4444-4444-8444-444444444413',
-    chunk_tier: 'child',
-    kind: 'table',
-    page_number: 5,
-    ocr_confidence: 0.99,
-    text_content:
-      '| Compliance Milestone Date | Minimum Core Capital Required | Daily Penalty |\n| 31 December 2025 | KES 3.0 billion | KES 100,000/day |\n| 31 December 2026 | KES 5.0 billion | KES 200,000/day |\n| 31 December 2027 | KES 7.0 billion | KES 350,000/day |\n| 31 December 2029 | KES 10.0 billion | License review |',
-    token_count: 68,
-    keywords: ['banking act', '2025', 'core capital', '3.0 billion', '5.0 billion', '7.0 billion', '10.0 billion', 'penalty'],
-  },
-  // Doc 6: ODPC Financial Sector Data Protection Guidance (2025)
-  {
-    chunk_id: '44444444-4444-4444-8444-444444444415',
-    version_id: '33333333-3333-4333-8333-333333333308',
-    parent_chunk_id: null,
-    chunk_tier: 'parent',
-    kind: 'text',
-    page_number: 9,
-    ocr_confidence: 0.98,
-    text_content:
-      'Clause 5.1 Cross-Border Transfer & Breach Notification (ODPC/FIN/2025/03): Regulated payment processors and commercial banks transferring customer financial records outside Kenya under Section 48 must enforce TLS 1.3 encryption in transit, AES-256 at rest, and execute approved Standard Contractual Clauses. Confirmed personal data breaches must be notified to the Office of the Data Protection Commissioner within 72 hours. Statutory anti-money laundering transaction records must be retained for 7 years before cryptographic erasure.',
-    token_count: 89,
-    keywords: ['data protection', 'odpc', 'cross-border', 'section 48', '72 hours', 'breach', 'tls 1.3', 'aes-256', '7 years', 'retention'],
-  },
-  {
-    chunk_id: '44444444-4444-4444-8444-444444444416',
-    version_id: '33333333-3333-4333-8333-333333333308',
-    parent_chunk_id: '44444444-4444-4444-8444-444444444415',
-    chunk_tier: 'child',
-    kind: 'text',
-    page_number: 9,
-    ocr_confidence: 0.98,
-    text_content:
-      'Clause 5.1 (ODPC/FIN/2025/03): Cross-border banking transfers require TLS 1.3 and AES-256 encryption. Confirmed data breaches must be reported to ODPC within 72 hours. Financial KYC records are retained for 7 years.',
-    token_count: 42,
-    keywords: ['data protection', 'odpc', '72 hours', 'breach', 'tls 1.3', 'aes-256', '7 years', 'cross-border'],
-  },
-  // Doc 7: CBK Cyber Resilience, AI Governance & Cloud Risk Guideline (2026)
-  {
-    chunk_id: '44444444-4444-4444-8444-444444444417',
-    version_id: '33333333-3333-4333-8333-333333333309',
-    parent_chunk_id: null,
-    chunk_tier: 'parent',
-    kind: 'table',
-    page_number: 6,
-    ocr_confidence: 0.99,
-    text_content:
-      'Section 3.1 Cyber Incident & Cloud Resilience Mandates (CBK/PG/18/2026):\n| Control Domain | Mandatory Requirement | SLA / Frequency |\n|---|---|---|\n| Major Cyber Incident Notification | Report payment-system or core-banking disruption to CBK Bank Supervision | Within 2 hours of detection |\n| Critical Core Banking Failover | Tier-1 recovery time objective (RTO) and recovery point objective (RPO) | RTO <= 2 hours; RPO <= 15 minutes |\n| Red-Team Penetration Testing | Independent adversarial testing on public APIs and cloud gateways | Quarterly |\nAll third-party cloud hosts storing primary ledgers must maintain tested active-active regional disaster recovery.',
-    token_count: 112,
-    keywords: ['cyber', 'cbk/pg/18/2026', '2 hours', 'incident', 'rto', 'rpo', '15 minutes', 'penetration testing', 'quarterly', 'cloud'],
-  },
-  {
-    chunk_id: '44444444-4444-4444-8444-444444444418',
-    version_id: '33333333-3333-4333-8333-333333333309',
-    parent_chunk_id: '44444444-4444-4444-8444-444444444417',
-    chunk_tier: 'child',
-    kind: 'table',
-    page_number: 6,
-    ocr_confidence: 0.99,
-    text_content:
-      '| Control Domain | Mandatory Requirement | SLA / Frequency |\n| Major Cyber Incident Notification | Report core-banking disruption to CBK | Within 2 hours |\n| Critical Banking Failover | Recovery Time (RTO) & Data Loss (RPO) | RTO <= 2 hours; RPO <= 15 minutes |\n| Red-Team Penetration Testing | Independent testing on APIs | Quarterly |',
-    token_count: 62,
-    keywords: ['cyber', 'cbk/pg/18/2026', '2 hours', 'incident', 'rto', '15 minutes', 'quarterly'],
-  },
-  {
-    chunk_id: '44444444-4444-4444-8444-444444444419',
-    version_id: '33333333-3333-4333-8333-333333333309',
-    parent_chunk_id: null,
-    chunk_tier: 'parent',
-    kind: 'text',
-    page_number: 11,
-    ocr_confidence: 0.98,
-    text_content:
-      'Section 6.4 Artificial Intelligence & Automated Decision Governance (CBK/PG/18/2026): Any machine learning or generative AI model used in credit underwriting, AML transaction triage, or regulatory interpretation must enforce: (1) zero training on restricted customer PII in external public clouds, (2) human-in-the-loop override capability for all adverse credit decisions above KES 250,000, and (3) deterministic source-citation logging retaining model version, prompt hash, and input record timestamps for at least 5 years.',
-    token_count: 92,
-    keywords: ['ai governance', 'artificial intelligence', 'machine learning', 'cbk/pg/18/2026', 'human-in-the-loop', '250,000', 'explainability', '5 years', 'prompt hash'],
-  },
-  {
-    chunk_id: '44444444-4444-4444-8444-444444444420',
-    version_id: '33333333-3333-4333-8333-333333333309',
-    parent_chunk_id: '44444444-4444-4444-8444-444444444419',
-    chunk_tier: 'child',
-    kind: 'text',
-    page_number: 11,
-    ocr_confidence: 0.98,
-    text_content:
-      'Section 6.4 AI Governance (CBK/PG/18/2026): AI models must avoid training on restricted PII in public clouds, provide human-in-the-loop override above KES 250,000, and retain citation logs for 5 years.',
-    token_count: 39,
-    keywords: ['ai governance', 'machine learning', 'cbk/pg/18/2026', 'human-in-the-loop', '250,000', '5 years'],
-  },
-  // Doc 8: AML / CFT & VASP Directive 2026
-  {
-    chunk_id: '44444444-4444-4444-8444-444444444421',
-    version_id: '33333333-3333-4333-8333-333333333310',
-    parent_chunk_id: null,
-    chunk_tier: 'parent',
-    kind: 'table',
-    page_number: 4,
-    ocr_confidence: 0.98,
-    text_content:
-      'Directive 4.2 Cash Reporting, Travel Rule & Suspicious Activity Deadlines (CBK/AML/2026/02):\n| Trigger Event | Threshold / Scope | Filing Deadline & Authority |\n|---|---|---|\n| Cash Transaction Report (CTR) | Single or linked cash transactions >= KES 1,000,000 (or USD 10,000 equivalent) | Weekly to Financial Reporting Centre (FRC) |\n| Suspicious Transaction Report (STR) | Suspected money laundering, structuring, or sanctions evasion | Within 48 hours to FRC |\n| Virtual Asset Travel Rule | Crypto / VASP transfers >= KES 100,000 | Immediate originator & beneficiary metadata |\nOnboarding any Foreign or Domestic Politically Exposed Person (PEP) requires Senior Management written approval and annual source-of-wealth refresh.',
-    token_count: 118,
-    keywords: ['aml', 'cft', 'ctr', 'str', 'frc', '1,000,000', '48 hours', 'travel rule', 'vasp', '100,000', 'pep', '2026'],
-  },
-  {
-    chunk_id: '44444444-4444-4444-8444-444444444422',
-    version_id: '33333333-3333-4333-8333-333333333310',
-    parent_chunk_id: '44444444-4444-4444-8444-444444444421',
-    chunk_tier: 'child',
-    kind: 'table',
-    page_number: 4,
-    ocr_confidence: 0.98,
-    text_content:
-      '| Trigger Event | Threshold | Deadline |\n| Cash Transaction Report (CTR) | >= KES 1,000,000 | Weekly to FRC |\n| Suspicious Transaction Report (STR) | Any suspected structuring | Within 48 hours to FRC |\n| Virtual Asset Travel Rule | Transfers >= KES 100,000 | Immediate metadata |',
-    token_count: 58,
-    keywords: ['aml', 'ctr', 'str', 'frc', '1,000,000', '48 hours', 'travel rule', 'vasp', '100,000'],
-  },
-  // Doc 9: Enterprise Credit Risk & IFRS 9 Policy 2026
-  {
-    chunk_id: '44444444-4444-4444-8444-444444444423',
-    version_id: '33333333-3333-4333-8333-333333333311',
-    parent_chunk_id: null,
-    chunk_tier: 'parent',
-    kind: 'table',
-    page_number: 8,
-    ocr_confidence: 0.99,
-    text_content:
-      'Section 3.3 IFRS 9 Expected Credit Loss (ECL) Staging Matrix (BANK/POL/2026/09):\n| Credit Stage | Days Past Due (DPD) Trigger | Loss Horizon | Minimum Coverage Floor |\n|---|---|---|---|\n| Stage 1 (Performing) | 0 to 29 DPD, no significant credit deterioration | 12-Month ECL | 1.0% general reserve floor |\n| Stage 2 (Underperforming / SICR) | 30 to 89 DPD or internal rating drop >= 2 notches | Lifetime ECL | 15.0% watchlist floor |\n| Stage 3 (Credit-Impaired / NPL) | 90+ DPD or restructured forbearance default | Lifetime ECL (Net of Collateral) | 100% unsecured shortfall |\nAll stage migration overrides require Chief Risk Officer sign-off prior to quarterly GL close.',
-    token_count: 118,
-    keywords: ['ifrs 9', 'ecl', 'expected credit loss', 'stage 1', 'stage 2', 'stage 3', '30 dpd', '90 dpd', 'npl', '15.0%', '1.0%'],
-  },
-  {
-    chunk_id: '44444444-4444-4444-8444-444444444424',
-    version_id: '33333333-3333-4333-8333-333333333311',
-    parent_chunk_id: '44444444-4444-4444-8444-444444444423',
-    chunk_tier: 'child',
-    kind: 'table',
-    page_number: 8,
-    ocr_confidence: 0.99,
-    text_content:
-      '| Credit Stage | Days Past Due Trigger | Loss Horizon | Coverage Floor |\n| Stage 1 (Performing) | 0-29 DPD | 12-Month ECL | 1.0% |\n| Stage 2 (SICR) | 30-89 DPD | Lifetime ECL | 15.0% |\n| Stage 3 (NPL) | 90+ DPD | Lifetime ECL | 100% unsecured |',
-    token_count: 58,
-    keywords: ['ifrs 9', 'ecl', 'stage 1', 'stage 2', 'stage 3', '30', '90', 'npl', '15.0%'],
-  },
-  // Doc 10: Internal Audit Board Report — Insider Lending & FX Desk Exceptions (2026)
-  {
-    chunk_id: '44444444-4444-4444-8444-444444444425',
-    version_id: '33333333-3333-4333-8333-333333333312',
-    parent_chunk_id: null,
-    chunk_tier: 'parent',
-    kind: 'text',
-    page_number: 14,
-    ocr_confidence: 0.97,
-    text_content:
-      'Audit Exception 2.1 (Internal Audit Tier Only) — Insider Lending & FX Net Open Position Controls (AUDIT/2026/07): Q2 2026 treasury testing detected two overnight breaches of the 10.0% core-capital Foreign Exchange Net Open Position (NOP) ceiling peaking at 11.4% during month-end settlement. Additionally, aggregate insider lending stood at 18.2% of core capital, safely within the 20.0% single-insider and 100.0% aggregate statutory limits. Whistleblower hotline escalations must be triaged by the Head of Internal Audit within 5 business days.',
-    token_count: 96,
-    keywords: ['insider lending', 'fx', 'net open position', 'nop', '10.0%', '11.4%', '18.2%', '20.0%', 'whistleblower', '5 business days', 'audit/2026/07'],
-  },
-  {
-    chunk_id: '44444444-4444-4444-8444-444444444426',
-    version_id: '33333333-3333-4333-8333-333333333312',
-    parent_chunk_id: '44444444-4444-4444-8444-444444444425',
-    chunk_tier: 'child',
-    kind: 'text',
-    page_number: 14,
-    ocr_confidence: 0.97,
-    text_content:
-      'Audit Exception 2.1 (AUDIT/2026/07): Treasury exceeded the 10.0% FX Net Open Position ceiling (peaking at 11.4%). Aggregate insider lending was 18.2% (below the 20.0% single-insider cap). Whistleblower cases require triage within 5 business days.',
-    token_count: 45,
-    keywords: ['insider lending', 'fx', '10.0%', '11.4%', '18.2%', '20.0%', 'whistleblower', '5 business days'],
-  },
-];
+export const SEED_VERSION_PAGES: Record<string, PageInput[]> = {
+  // 1. Cap. 491 (1966 Original Enactment) — 4 pages
+  '33333333-3333-4333-8333-333333333301': [
+    {
+      page_number: 1,
+      text: 'Part I Preliminary & Commencement (Cap. 491, 1966 Original Enactment): This Act may be cited as the Central Bank of Kenya Act and shall come into operation on such day as the Minister may by notice in the Gazette appoint. In this Act, unless the context otherwise requires, "specified bank" means any licensed commercial bank carrying on banking business in Kenya under the Banking Ordinance.',
+    },
+    {
+      page_number: 2,
+      text: 'Part II Establishment & Corporate Status (Cap. 491, 1966): There is hereby established a bank to be known as the Central Bank of Kenya which shall be a body corporate with perpetual succession and a common seal. The head office of the Bank shall be in Nairobi, and the Bank may establish branches or appoint agents in any part of Kenya or abroad with approval of the Board.',
+    },
+    {
+      page_number: 3,
+      text: 'Section 11 Board of Directors & Governor Tenure (Cap. 491, 1966): The Board of Directors shall consist of the Governor, Deputy Governor, the Permanent Secretary to the Treasury, and four other directors appointed by the President for a term of four years. Every director shall declare any direct or indirect pecuniary interest in banking or credit contracts before deliberation.',
+    },
+    {
+      page_number: 4,
+      text: 'Section 4 (1966 Original Enactment): The principal object of the Bank shall be to regulate the issue of notes and coins, to assist in the development and maintenance of a sound monetary, credit and banking system in Kenya conducive to the orderly and balanced economic development of the country and the external stability of the currency. Authorized capital at commencement is fixed at twenty-six million shillings, paid from the Consolidated Fund in instalments approved by the Treasury.',
+    },
+  ],
+  // 2. Cap. 491 (2012 Revised Edition) — 4 key statutory pages (incl. Page 7)
+  '33333333-3333-4333-8333-333333333302': [
+    {
+      page_number: 1,
+      text: 'Part I Short Title & Statutory Interpretation (Cap. 491, 2012 Revised Edition): "Board" means the Board of Directors of the Bank; "Minister" means the Cabinet Secretary responsible for finance; "bank" includes any institution licensed under the Banking Act or Microfinance Act participating in the national payment and clearing system.',
+    },
+    {
+      page_number: 3,
+      text: 'Section 4B Monetary Policy Committee (Cap. 491, 2012 Revised Edition): There shall be a Monetary Policy Committee responsible for formulating monetary policy. The Committee shall meet at least once every two months and publish its policy rate decision and inflation outlook report within seven days of each sitting.',
+    },
+    {
+      page_number: 5,
+      text: 'Section 22 Legal Tender & Currency Issuance (Cap. 491, 2012 Revised Edition): The unit of currency of Kenya shall be the Kenya shilling divided into one hundred cents. Only notes and coins issued by the Central Bank of Kenya and not demonetized by Gazette Notice shall constitute legal tender for payment of public and private debts.',
+    },
+    {
+      page_number: 7,
+      text: 'Section 4 & Section 4A (2012 Revised Edition): The principal object of the Bank shall be to formulate and implement monetary policy directed to achieving and maintaining stability in the general level of prices. Under Section 4A, the Bank shall foster the liquidity, solvency and proper functioning of a stable market-based financial system and formulate and implement foreign exchange policy. Section 8 fixes authorized capital at five billion shillings, and the Bank shall maintain a General Reserve Fund funded from annual net profits.',
+    },
+  ],
+  // 3. CBK/PG/03 (2013–2023 Framework) — 4 pages (incl. Page 12 table)
+  '33333333-3333-4333-8333-333333333303': [
+    {
+      page_number: 2,
+      text: 'Section 1.1 Scope & Objective (CBK/PG/03, 2013 Framework): This Guideline applies to all institutions licensed under the Banking Act (Cap. 488) and establishes minimum capital adequacy standards aligned with Basel II/III core principles. Institutions must maintain capital commensurate with credit, market, and operational risk exposures on both solo and consolidated bases.',
+    },
+    {
+      page_number: 5,
+      text: 'Section 2.1 Components of Core Capital & Tier 2 Capital (CBK/PG/03, 2013): Core Capital (Tier 1) consists of permanent shareholders equity (paid-up ordinary shares), disclosed general reserves, and audited retained earnings, less goodwill, intangible assets, and deferred tax deductions. Tier 2 Supplementary Capital includes general loan loss reserves up to 1.25% of risk-weighted assets and approved subordinated debt capped at 50% of Core Capital.',
+    },
+    {
+      page_number: 9,
+      text: 'Section 2.6 Risk-Weighting Methodology (CBK/PG/03, 2013): Claims on the Government of Kenya and Central Bank of Kenya denominated and funded in Kenya shillings carry a 0% credit risk weight. Fully secured residential mortgage facilities meeting loan-to-value limits carry a 35% risk weight, whereas unrated commercial corporate facilities carry 100%.',
+    },
+    {
+      page_number: 12,
+      text: `Section 3.2 Capital Adequacy Ratios (2013 Framework, effective 2013-01-01 to 2023-06-30):
+| Metric | Minimum Ratio | Capital Conservation Buffer | Total Requirement |
+|---|---|---|---|
+| Core Capital / Total Risk-Weighted Assets (TRWA) | 8.0% | 2.5% | 10.5% |
+| Total Capital / Total Risk-Weighted Assets (TRWA) | 12.0% | 2.5% | 14.5% |
+| Core Capital / Total Deposit Liabilities | 8.0% | N/A | 8.0% |
+Minimum absolute paid-up core capital for commercial banks under the 2013 schedule is KES 1.0 billion, and institutions breaching the conservation buffer face mandatory restrictions on discretionary bonus and dividend payouts.`,
+    },
+  ],
+  // 4. CBK/PG/03 (2023 Revised Capital Buffer) — 4 pages (incl. Page 14 table)
+  '33333333-3333-4333-8333-333333333304': [
+    {
+      page_number: 3,
+      text: 'Section 1.3 Supervisory Transition & D-SIB Designation (CBK/PG/03, 2023 Revised Edition): The Central Bank identifies Domestic Systemically Important Banks (D-SIBs) annually based on size, interconnectedness, substitutability, and cross-jurisdictional complexity. Designated D-SIB institutions are subject to an additional Common Equity Tier 1 surcharge.',
+    },
+    {
+      page_number: 7,
+      text: 'Section 2.4 Internal Capital Adequacy Assessment Process (ICAAP, 2023): Every commercial bank board must approve an annual forward-looking ICAAP stress-test submission demonstrating capital resilience over a 3-year horizon against severe macroeconomic and sectoral credit-concentration shocks.',
+    },
+    {
+      page_number: 10,
+      text: 'Section 3.1 Leverage Ratio & Large Exposure Cap (CBK/PG/03, 2023): In addition to risk-weighted adequacy ratios, institutions shall maintain a non-risk-based Tier 1 Leverage Ratio of at least 3.0% of total on-balance-sheet and off-balance-sheet exposures, and single-borrower credit exposure shall not exceed 25.0% of Core Capital.',
+    },
+    {
+      page_number: 14,
+      text: `Section 4.1 Revised Capital Adequacy & D-SIB Schedule (effective 2023-07-01, currently in force):
+| Metric | Minimum Ratio | Conservation Buffer | D-SIB Tier 1 Surcharge | Total D-SIB Requirement |
+|---|---|---|---|---|
+| Core Capital / TRWA | 8.0% | 2.5% | 1.5% | 12.0% |
+| Total Capital / TRWA | 12.0% | 2.5% | 1.5% | 16.0% |
+| Core Capital / Total Deposits | 8.0% | N/A | N/A | 8.0% |
+Revised statutory floor raises minimum core capital for commercial banks from KES 1.0 billion to KES 3.0 billion by December 2025 and KES 10.0 billion by December 2029.`,
+    },
+  ],
+  // 5. CBK/CIRC/11/2024 — 4 pages (incl. Page 3 table)
+  '33333333-3333-4333-8333-333333333305': [
+    {
+      page_number: 1,
+      text: 'Circular 11/2024 Section 1.1 Directive Purpose (Compliance Officer Tier): This supervisory circular updates intraday liquidity monitoring, weekly statutory liquidity return templates (BSD-L1), and monthly Liquidity Coverage Ratio (LCR) stress haircuts for all licensed commercial banks and mortgage finance companies.',
+    },
+    {
+      page_number: 2,
+      text: 'Circular 11/2024 Section 1.4 High-Quality Liquid Assets (HQLA) Eligibility: Level 1 liquid assets include cash in vault, unrestricted balances held at the Central Bank of Kenya, and unencumbered Kenya Government Treasury Bills and Bonds valued at daily mark-to-market prices.',
+    },
+    {
+      page_number: 3,
+      text: `Circular 11/2024 Clause 2.4 — Statutory Liquidity & Stress Return Haircuts (Compliance Officer Tier):
+| Asset / Outflow Bucket | Statutory Minimum / Haircut | Reporting Frequency | Escalation Threshold |
+|---|---|---|---|
+| Statutory Liquidity Ratio | 20.0% of total deposit liabilities | Weekly (BSD-L1) | Alert below 22.0% |
+| 30-Day Liquidity Coverage Ratio (LCR) | 100.0% | Monthly (BSD-L2) | Alert below 105.0% |
+| Uninsured Corporate Deposit Run-Off Haircut | 40.0% stress outflow factor | Monthly | Board Risk Committee |
+Institutions falling below 22.0% statutory liquidity must file an intraday cash-flow contingency notice within 24 hours signed by the Chief Financial Officer and Head of Treasury.`,
+    },
+    {
+      page_number: 4,
+      text: 'Circular 11/2024 Section 3.1 Contingency Funding Plan Testing: Treasury Operations must execute quarterly reverse stress-test drills simulating simultaneous interbank repo market closure and 15% retail deposit withdrawal over five consecutive business days.',
+    },
+  ],
+  // 6. OAG/SAR/2025/04 — 4 pages (incl. Page 19)
+  '33333333-3333-4333-8333-333333333306': [
+    {
+      page_number: 4,
+      text: 'Section 1.2 Audit Mandate & Scope (OAG Special Audit FY 2024/25, Internal Audit Tier Only): Audit procedures covered treasury cash-reserve maintenance, correspondent nostro reconciliations, overnight interbank borrowings, and Treasury Single Account settlement cutoffs from 1 July 2024 through 31 December 2024.',
+    },
+    {
+      page_number: 9,
+      text: 'Finding 2.3 Treasury Collateral & Haircut Governance (Internal Audit Tier Only): Automated collateral valuation feeds experienced a 6-hour pricing lag during October 2024 T-bond auctions. Management agreed to enforce dual-vendor mark-to-market verification before collateral release.',
+    },
+    {
+      page_number: 14,
+      text: 'Finding 3.1 SWIFT Alliance Access & Segregation of Duties (Internal Audit Tier Only): Four privileged user profiles retained dual payment-initiation and release roles in disaster-recovery testing. Emergency credentials must be vaulted with automatic 4-hour expiry.',
+    },
+    {
+      page_number: 19,
+      text: 'Finding 4.2 (Internal Audit Tier Only) — Unreconciled Nostro Suspense & Reserve Buffer Variance: During Q3 FY 2024/25, internal audit sampling identified KES 412.6 million in aged nostro suspense items exceeding 30 days across three correspondent accounts, alongside a temporary 140 bps reserve buffer shortfall resolved within 48 hours via interbank repo. Remediation sign-off is tracked monthly by the Board Audit Committee.',
+    },
+  ],
+  // 7. Banking (Amendment) Act, 2025 — 4 pages (incl. Page 5 table)
+  '33333333-3333-4333-8333-333333333307': [
+    {
+      page_number: 1,
+      text: 'Section 1 Short Title & Enactment (Banking Amendment Act, 2025): This Act may be cited as the Banking (Amendment) Act, 2025, amending the Banking Act (Cap. 488) to strengthen institutional capital resilience, governance accountability, and staggered statutory minimum core capital compliance.',
+    },
+    {
+      page_number: 2,
+      text: 'Section 7 Amended Core Capital & Licensing Obligations (Banking Amendment Act, 2025): No institution shall be granted or hold a commercial banking license unless its paid-up core capital meets or exceeds the phased statutory minimum amounts prescribed in the Second Schedule.',
+    },
+    {
+      page_number: 4,
+      text: 'Section 18A Capital Restoration Plans & Merger Facilitation (Banking Amendment Act, 2025): Where an institution projects a capital shortfall against any upcoming December milestone, its Board must submit a binding capital injection, rights issue, or merger transaction timeline at least six months prior to the compliance deadline.',
+    },
+    {
+      page_number: 5,
+      text: `Second Schedule — Staggered Minimum Core Capital Transition for Commercial Banks (Banking Amendment Act, 2025):
+| Compliance Milestone Date | Minimum Core Capital Required | Non-Compliance Daily Administrative Penalty |
+|---|---|---|
+| 31 December 2025 | KES 3.0 billion | KES 100,000 per day |
+| 31 December 2026 | KES 5.0 billion | KES 200,000 per day |
+| 31 December 2027 | KES 7.0 billion | KES 350,000 per day |
+| 31 December 2029 | KES 10.0 billion | License suspension review |
+Banks failing to submit a board-approved capital build-up plan within 90 days of enactment face dividend distribution restrictions under Section 18A.`,
+    },
+  ],
+  // 8. ODPC/FIN/2025/03 — 4 pages (incl. Page 9)
+  '33333333-3333-4333-8333-333333333308': [
+    {
+      page_number: 2,
+      text: 'Clause 1.2 Applicability to Financial Institutions (ODPC/FIN/2025/03): This Guidance Note applies to commercial banks, digital credit providers, mobile-money operators, and payment gateways acting as Data Controllers or Data Processors for customer KYC, biometric, credit-bureau, and payment records.',
+    },
+    {
+      page_number: 5,
+      text: 'Clause 3.1 Lawful Basis, Consent & Automated Credit Scoring (ODPC/FIN/2025/03): Institutions using automated profiling to assess loan eligibility must disclose plain-language adverse decision factors to applicants and provide an accessible human-review channel within 7 business days of request.',
+    },
+    {
+      page_number: 7,
+      text: 'Clause 4.2 Data Protection Impact Assessments (DPIA, ODPC/FIN/2025/03): Prior to launching any cloud AI model, open-banking API, or biometric onboarding workflow, institutions must file a documented Data Protection Impact Assessment reviewed by their designated Data Protection Officer.',
+    },
+    {
+      page_number: 9,
+      text: 'Clause 5.1 Cross-Border Transfer & Breach Notification (ODPC/FIN/2025/03): Regulated payment processors and commercial banks transferring customer financial records outside Kenya under Section 48 must enforce TLS 1.3 encryption in transit, AES-256 at rest, and execute approved Standard Contractual Clauses. Confirmed personal data breaches must be notified to the Office of the Data Protection Commissioner within 72 hours. Statutory anti-money laundering transaction records must be retained for 7 years before cryptographic erasure.',
+    },
+  ],
+  // 9. CBK/PG/18/2026 — 5 pages (incl. Page 6 table & Page 11 AI Governance)
+  '33333333-3333-4333-8333-333333333309': [
+    {
+      page_number: 2,
+      text: 'Section 1.2 Board Cyber Oversight & CISO Independence (CBK/PG/18/2026): Regulated institutions shall appoint an independent Chief Information Security Officer (CISO) with direct reporting access to the Board Risk Committee and conduct annual board-level cyber crisis tabletop simulations.',
+    },
+    {
+      page_number: 4,
+      text: 'Section 2.3 Zero-Trust Identity & Privileged Access Management (CBK/PG/18/2026): Phishing-resistant multi-factor authentication (FIDO2 or hardware tokens) is mandatory for all administrative cloud consoles, core-banking database sessions, and SWIFT payment terminals.',
+    },
+    {
+      page_number: 6,
+      text: `Section 3.1 Cyber Incident & Cloud Resilience Mandates (CBK/PG/18/2026):
+| Control Domain | Mandatory Requirement | SLA / Frequency |
+|---|---|---|
+| Major Cyber Incident Notification | Report payment-system or core-banking disruption to CBK Bank Supervision | Within 2 hours of detection |
+| Critical Core Banking Failover | Tier-1 recovery time objective (RTO) and recovery point objective (RPO) | RTO <= 2 hours; RPO <= 15 minutes |
+| Red-Team Penetration Testing | Independent adversarial testing on public APIs and cloud gateways | Quarterly |
+All third-party cloud hosts storing primary ledgers must maintain tested active-active regional disaster recovery.`,
+    },
+    {
+      page_number: 8,
+      text: 'Section 4.2 Third-Party Cloud Exit Strategy & Escrow Controls (CBK/PG/18/2026): Critical cloud SaaS and IaaS contracts must include data portability guarantees, sovereign audit rights for CBK inspectors, and quarterly configuration-drift scans.',
+    },
+    {
+      page_number: 11,
+      text: 'Section 6.4 Artificial Intelligence & Automated Decision Governance (CBK/PG/18/2026): Any machine learning or generative AI model used in credit underwriting, AML transaction triage, or regulatory interpretation must enforce: (1) zero training on restricted customer PII in external public clouds, (2) human-in-the-loop override capability for all adverse credit decisions above KES 250,000, and (3) deterministic source-citation logging retaining model version, prompt hash, and input record timestamps for at least 5 years.',
+    },
+  ],
+  // 10. CBK/AML/2026/02 — 4 pages (incl. Page 4 table)
+  '33333333-3333-4333-8333-333333333310': [
+    {
+      page_number: 1,
+      text: 'Directive 1.1 Risk-Based AML/CFT & VASP Supervision (CBK/AML/2026/02): Commercial banks, mobile payment providers, and licensed Virtual Asset Service Providers (VASPs) must maintain dynamic customer risk scoring updated continuously on sanctions designations and beneficial-ownership changes.',
+    },
+    {
+      page_number: 2,
+      text: 'Directive 2.3 Enhanced Customer Due Diligence & Beneficial Ownership (CBK/AML/2026/02): For all corporate entities, trusts, and nominee arrangements, institutions must verify ultimate natural-person beneficial owners holding 10% or more equity or effective voting control prior to account activation.',
+    },
+    {
+      page_number: 4,
+      text: `Directive 4.2 Cash Reporting, Travel Rule & Suspicious Activity Deadlines (CBK/AML/2026/02):
+| Trigger Event | Threshold / Scope | Filing Deadline & Authority |
+|---|---|---|
+| Cash Transaction Report (CTR) | Single or linked cash transactions >= KES 1,000,000 (or USD 10,000 equivalent) | Weekly to Financial Reporting Centre (FRC) |
+| Suspicious Transaction Report (STR) | Suspected money laundering, structuring, or sanctions evasion | Within 48 hours to FRC |
+| Virtual Asset Travel Rule | Crypto / VASP transfers >= KES 100,000 | Immediate originator & beneficiary metadata |
+Onboarding any Foreign or Domestic Politically Exposed Person (PEP) requires Senior Management written approval and annual source-of-wealth refresh.`,
+    },
+    {
+      page_number: 6,
+      text: 'Directive 5.1 Sanctions Screening & Tipping-Off Prohibition (CBK/AML/2026/02): Real-time name and wallet screening against UN Security Council, OFAC, and domestic targeted financial sanctions lists must complete prior to cross-border settlement release, and staff are strictly prohibited from disclosing STR filings to customers.',
+    },
+  ],
+  // 11. BANK/POL/2026/09 (IFRS 9 Policy) — 4 pages (incl. Page 8 table)
+  '33333333-3333-4333-8333-333333333311': [
+    {
+      page_number: 2,
+      text: 'Section 1.4 Credit Risk Governance & Underwriting Authority (BANK/POL/2026/09): All corporate credit facilities above KES 50 million require independent Credit Risk sign-off, debt-service coverage verification, and perfection of perfected security charges prior to disbursement.',
+    },
+    {
+      page_number: 5,
+      text: 'Section 2.2 Significant Increase in Credit Risk (SICR) Qualitative Triggers (BANK/POL/2026/09): Beyond days-past-due delinquency counters, exposures exhibiting debt-restructuring requests, covenant breaches, sector downturns, or two-notch internal rating downgrades must immediately migrate from Stage 1 to Stage 2.',
+    },
+    {
+      page_number: 8,
+      text: `Section 3.3 IFRS 9 Expected Credit Loss (ECL) Staging Matrix (BANK/POL/2026/09):
+| Credit Stage | Days Past Due (DPD) Trigger | Loss Horizon | Minimum Coverage Floor |
+|---|---|---|---|
+| Stage 1 (Performing) | 0 to 29 DPD, no significant credit deterioration | 12-Month ECL | 1.0% general reserve floor |
+| Stage 2 (Underperforming / SICR) | 30 to 89 DPD or internal rating drop >= 2 notches | Lifetime ECL | 15.0% watchlist floor |
+| Stage 3 (Credit-Impaired / NPL) | 90+ DPD or restructured forbearance default | Lifetime ECL (Net of Collateral) | 100% unsecured shortfall |
+All stage migration overrides require Chief Risk Officer sign-off prior to quarterly GL close.`,
+    },
+    {
+      page_number: 10,
+      text: 'Section 4.1 Collateral Haircuts & Write-Off Policy (BANK/POL/2026/09): Forced-sale real-estate valuations must be refreshed every 24 months by panel valuers, and unsecured non-performing facilities past 360 DPD without active legal recovery must be written off against provisions.',
+    },
+  ],
+  // 12. AUDIT/2026/07 (Internal Audit Board Report) — 4 pages (incl. Page 14)
+  '33333333-3333-4333-8333-333333333312': [
+    {
+      page_number: 3,
+      text: 'Audit Section 1.1 Executive Mandate (AUDIT/2026/07, Internal Audit Tier Only): Internal Audit evaluated FX dealing room limit compliance, insider-lending director disclosures under Section 11 of the Banking Act, and whistleblower governance across Q1–Q2 2026.',
+    },
+    {
+      page_number: 7,
+      text: 'Audit Section 1.5 Dealing Room Voice Logging & Deal-Ticket Integrity (AUDIT/2026/07): Sample testing of 120 interbank spot and forward FX tickets confirmed accurate timestamp matching between Bloomberg Reuters dealing feeds and treasury back-office blotters.',
+    },
+    {
+      page_number: 10,
+      text: 'Audit Section 1.8 Related-Party Register Completeness (AUDIT/2026/07): Board Credit Committee minutes confirmed quarterly verification of director, senior officer, and associate exposures at arm-length commercial interest rates.',
+    },
+    {
+      page_number: 14,
+      text: 'Audit Exception 2.1 (Internal Audit Tier Only) — Insider Lending & FX Net Open Position Controls (AUDIT/2026/07): Q2 2026 treasury testing detected two overnight breaches of the 10.0% core-capital Foreign Exchange Net Open Position (NOP) ceiling peaking at 11.4% during month-end settlement. Additionally, aggregate insider lending stood at 18.2% of core capital, safely within the 20.0% single-insider and 100.0% aggregate statutory limits. Whistleblower hotline escalations must be triaged by the Head of Internal Audit within 5 business days.',
+    },
+  ],
+};
+
+function buildSeedChunksFromPages(): DocumentChunk[] {
+  const allChunks: DocumentChunk[] = [];
+  for (const ver of SEED_VERSIONS) {
+    const doc = SEED_DOCUMENTS.find((d) => d.doc_id === ver.doc_id);
+    const pages = SEED_VERSION_PAGES[ver.version_id];
+    if (!doc || !pages) continue;
+    const chunked = chunkDocumentPages({
+      doc_id: doc.doc_id,
+      doc_title: doc.title,
+      version_id: ver.version_id,
+      citation_code: doc.citation_code,
+      pages,
+      run_id: '66666666-6666-4666-8666-666666666600',
+      now_iso: doc.created_at,
+      deterministic_seed_prefix: `seed:${ver.version_id}`,
+      first_parent_id:
+        ver.version_id === '33333333-3333-4333-8333-333333333301'
+          ? '44444444-4444-4444-8444-444444444401'
+          : undefined,
+      ocr_confidence: 0.98,
+    });
+    allChunks.push(...chunked.parentChunks, ...chunked.childChunks);
+  }
+  return allChunks;
+}
+
+export const SEED_CHUNKS: DocumentChunk[] = buildSeedChunksFromPages();
 
 export const SEED_QUARANTINE: QuarantineRecord[] = [
   {

@@ -176,8 +176,9 @@ QDRANT_COLLECTION=lexgate_policies
 QDRANT_API_KEY=
 REDIS_URL=redis://localhost:6379
 REDIS_TTL_SECONDS=3600
-GEMINI_API_KEY=MY_GEMINI_API_KEY`,
-    note: 'LLM_PROVIDER=auto uses local Ollama (llama3.1:8b) automatically whenever http://localhost:11434 is reachable (0 outbound bytes). GEMINI_API_KEY is optional locally.',
+GEMINI_API_KEY=MY_GEMINI_API_KEY
+LOAD_STARTER_CORPUS=true`,
+    note: 'LLM_PROVIDER=auto uses local Ollama (llama3.1:8b) automatically whenever http://localhost:11434 is reachable (0 outbound bytes). Leave QDRANT_API_KEY empty for local Docker Qdrant. Set LOAD_STARTER_CORPUS=false if you want to boot with an empty Policy Library (0 starter docs) containing only your own uploaded files.',
   },
   {
     id: 'step-4',
