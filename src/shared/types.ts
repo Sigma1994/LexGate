@@ -31,6 +31,10 @@ export interface RegulatoryDocument {
   license: string;
   sensitivity: GroupId;
   created_at: string;
+  ai_summary?: string | null;
+  ai_summary_model?: string | null;
+  ai_summary_generated_at?: string | null;
+  ai_summary_error?: string | null;
 }
 
 export interface DocumentVersion {

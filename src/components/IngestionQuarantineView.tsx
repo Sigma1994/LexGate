@@ -1,20 +1,28 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   ArrowRight,
   CheckCircle2,
+  Download,
   Eye,
   FilePlus2,
   FileText,
   Info,
   Loader2,
+  RefreshCw,
   RotateCcw,
   Search,
   ShieldBan,
+  Sparkles,
   Trash2,
   Upload,
   X,
 } from 'lucide-react';
+import {
+  buildIngestionAuditCsv,
+  type UploadBatchItemRecord,
+  type UploadBatchRecord,
+} from '../lib/exportIngestionAuditCsv.ts';
 import { postFormDataWithProgress, safeFetchJson } from '../lib/safeFetchJson.ts';
 import { DatabaseStatusModal } from './DatabaseStatusModal.tsx';
 import { DocumentHistoryViz, matchesPolicyDocumentSearch } from './DocumentHistoryViz.tsx';
@@ -97,8 +105,22 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
   const [searchFilter, setSearchFilter] = useState('');
   const [tierFilter, setTierFilter] = useState<'all' | GroupId>('all');
 
-  // Direct Qdrant upload state
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  // Direct Qdrant multi-file & text upload state
+  const [queuedFiles, setQueuedFiles] = useState<
+    Array<{
+      queue_id: string;
+      file: File;
+      title: string;
+      citation_code: string;
+      status: 'queued' | 'uploading' | 'vectorizing' | 'done' | 'failed';
+      progress: number;
+      step_label: string;
+      sections_created?: number;
+      vectors_indexed?: number;
+      quarantined_count?: number;
+      error?: string;
+    }>
+  >([]);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [previewingFile, setPreviewingFile] = useState(false);
   const [previewNote, setPreviewNote] = useState<string | null>(null);
@@ -112,28 +134,30 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadResult, setUploadResult] = useState<UploadDocumentResult | null>(null);
+  const [batchSummaryNote, setBatchSummaryNote] = useState<string | null>(null);
   const [corpusActionBusy, setCorpusActionBusy] = useState(false);
   const [deletingDocId, setDeletingDocId] = useState<string | null>(null);
+  const [selectedDocIds, setSelectedDocIds] = useState<string[]>([]);
+  const [bulkActionBusy, setBulkActionBusy] = useState<'delete' | 'reprocess' | null>(null);
+  const [bulkActionNote, setBulkActionNote] = useState<string | null>(null);
   const [isDbStatusOpen, setIsDbStatusOpen] = useState(false);
   const [selectedPreviewDocId, setSelectedPreviewDocId] = useState<string | null>(null);
   const [previewData, setPreviewData] = useState<DocumentFirstPagePreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewTab, setPreviewTab] = useState<'page' | 'vectors'>('page');
-  const [uploadBatches, setUploadBatches] = useState<
-    Array<{
-      batch_id: string;
-      batch_number: number;
-      label: string;
-      status: 'uploading' | 'vectorizing' | 'success' | 'failed';
-      progress: number;
-      detail: string;
-    }>
-  >([]);
+  const [uploadBatches, setUploadBatches] = useState<UploadBatchRecord[]>([]);
+  const [clearedBatchDisplayAfter, setClearedBatchDisplayAfter] = useState(0);
+  const [auditExportNote, setAuditExportNote] = useState<string | null>(null);
+  const [summarizingDocIds, setSummarizingDocIds] = useState<string[]>([]);
   const uploadSectionRef = useRef<HTMLElement | null>(null);
   const catalogSectionRef = useRef<HTMLElement | null>(null);
   const previewPaneRef = useRef<HTMLDivElement | null>(null);
+  const selectAllCheckboxRef = useRef<HTMLInputElement | null>(null);
   const batchCounterRef = useRef(0);
+  const attemptedAutoSummarizeRef = useRef<Set<string>>(new Set());
+  const onSnapshotUpdateRef = useRef(onSnapshotUpdate);
+  onSnapshotUpdateRef.current = onSnapshotUpdate;
 
   const loadDocumentPreview = async (
     docId: string,
@@ -169,46 +193,176 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
     });
   }, [snapshot.documents, searchFilter, tierFilter]);
 
+  useEffect(() => {
+    const validIds = new Set(snapshot.documents.map((d) => d.doc_id));
+    setSelectedDocIds((prev) => {
+      const next = prev.filter((id) => validIds.has(id));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [snapshot.documents]);
+
+  const selectedVisibleCount = useMemo(() => {
+    const selectedSet = new Set(selectedDocIds);
+    return filteredDocuments.filter((d) => selectedSet.has(d.doc_id)).length;
+  }, [filteredDocuments, selectedDocIds]);
+
+  const allVisibleSelected =
+    filteredDocuments.length > 0 && selectedVisibleCount === filteredDocuments.length;
+
+  useEffect(() => {
+    if (!selectAllCheckboxRef.current) return;
+    selectAllCheckboxRef.current.indeterminate =
+      selectedVisibleCount > 0 && selectedVisibleCount < filteredDocuments.length;
+  }, [selectedVisibleCount, filteredDocuments.length]);
+
+  const summarizeDocument = async (docId: string, force = false) => {
+    setSummarizingDocIds((prev) => (prev.includes(docId) ? prev : [...prev, docId]));
+    try {
+      const res = await fetch(
+        `/api/admin/documents/${encodeURIComponent(docId)}/summarize`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ force }),
+        }
+      );
+      const data = (await res.json().catch(() => null)) as {
+        snapshot?: LedgerSnapshot;
+      } | null;
+      if (data?.snapshot) {
+        onSnapshotUpdateRef.current(data.snapshot);
+      }
+    } catch {
+      // Transport failure leaves row state intact for user retry
+    } finally {
+      setSummarizingDocIds((prev) => prev.filter((id) => id !== docId));
+    }
+  };
+
+  useEffect(() => {
+    const missing = snapshot.documents
+      .filter(
+        (doc) =>
+          !doc.ai_summary &&
+          !doc.ai_summary_error &&
+          !attemptedAutoSummarizeRef.current.has(doc.doc_id)
+      )
+      .sort((a, b) => (a.origin === 'user_upload' ? -1 : b.origin === 'user_upload' ? 1 : 0));
+
+    if (missing.length === 0) return;
+
+    let cancelled = false;
+    const docIdsToRun = missing.map((d) => d.doc_id);
+    for (const id of docIdsToRun) {
+      attemptedAutoSummarizeRef.current.add(id);
+    }
+
+    const runQueue = async () => {
+      let cursor = 0;
+      const worker = async () => {
+        while (!cancelled && cursor < docIdsToRun.length) {
+          const docId = docIdsToRun[cursor++];
+          setSummarizingDocIds((prev) => (prev.includes(docId) ? prev : [...prev, docId]));
+          try {
+            const res = await fetch(
+              `/api/admin/documents/${encodeURIComponent(docId)}/summarize`,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ force: false }),
+              }
+            );
+            const payload = (await res.json().catch(() => null)) as {
+              snapshot?: LedgerSnapshot;
+            } | null;
+            if (!cancelled && payload?.snapshot) {
+              onSnapshotUpdateRef.current(payload.snapshot);
+            }
+          } catch {
+            // Keep UI resilient if connection closes on unmount
+          } finally {
+            setSummarizingDocIds((prev) => prev.filter((id) => id !== docId));
+          }
+        }
+      };
+
+      await Promise.all([worker(), worker()]);
+    };
+
+    void runQueue();
+    return () => {
+      cancelled = true;
+    };
+  }, [snapshot.documents]);
+
   const formatBytes = (bytes: number): string => {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
     return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
   };
 
-  const acceptChosenFile = (file: File) => {
-    setSelectedFile(file);
+  const deriveDocMetadataFromFilename = (fileName: string) => {
+    const baseTitle = fileName.replace(/\.[^/.]+$/, '').replace(/[_-]+/g, ' ').trim();
+    const slug = baseTitle
+      .replace(/[^a-zA-Z0-9]+/g, '-')
+      .replace(/^-|-$/g, '')
+      .toUpperCase()
+      .slice(0, 12);
+    return {
+      derivedTitle: baseTitle || fileName,
+      derivedCitation: `DOC/${slug || 'POLICY'}/${new Date().getFullYear()}`,
+    };
+  };
+
+  const acceptChosenFiles = (files: FileList | File[]) => {
+    const incoming = Array.from(files);
+    if (incoming.length === 0) return;
+
     setUploadError(null);
     setUploadResult(null);
+    setBatchSummaryNote(null);
     setPreviewNote(null);
     setRawText('');
-    const baseTitle = file.name.replace(/\.[^/.]+$/, '').replace(/[_-]+/g, ' ').trim();
-    if (!title.trim() && baseTitle) {
-      setTitle(baseTitle);
-    }
-    if (!citationCode.trim()) {
-      const slug = baseTitle
-        .replace(/[^a-zA-Z0-9]+/g, '-')
-        .replace(/^-|-$/g, '')
-        .toUpperCase()
-        .slice(0, 12);
-      setCitationCode(`DOC/${slug || 'POLICY'}/${new Date().getFullYear()}`);
-    }
+
+    const mapped = incoming.map((file, idx) => {
+      const { derivedTitle, derivedCitation } = deriveDocMetadataFromFilename(file.name);
+      return {
+        queue_id: `q-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 7)}`,
+        file,
+        title: derivedTitle,
+        citation_code: derivedCitation,
+        status: 'queued' as const,
+        progress: 0,
+        step_label: 'Queued for extraction & Qdrant indexing',
+      };
+    });
+
+    setQueuedFiles((prev) => {
+      const activePrev = prev.filter((item) => item.status === 'queued' || item.status === 'uploading' || item.status === 'vectorizing');
+      const next = [...activePrev, ...mapped];
+      if (next.length === 1) {
+        if (!title.trim()) setTitle(next[0].title);
+        if (!citationCode.trim()) setCitationCode(next[0].citation_code);
+      }
+      return next;
+    });
   };
 
   const handleFileLoad = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    acceptChosenFile(file);
+    if (e.target.files && e.target.files.length > 0) {
+      acceptChosenFiles(e.target.files);
+    }
     e.target.value = '';
   };
 
   const handlePreviewSelectedFile = async () => {
-    if (!selectedFile) return;
+    const firstPending = queuedFiles.find((q) => q.status === 'queued') ?? queuedFiles[0];
+    if (!firstPending) return;
     setPreviewingFile(true);
     setUploadError(null);
     try {
       const form = new FormData();
-      form.append('file', selectedFile);
+      form.append('file', firstPending.file);
       const { data } = await safeFetchJson<{
         detected_format: string;
         pages_extracted: number;
@@ -234,14 +388,29 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
 
   const updateUploadBatch = (
     batchId: string,
-    patch: Partial<{
-      status: 'uploading' | 'vectorizing' | 'success' | 'failed';
-      progress: number;
-      detail: string;
-    }>
+    patch: Partial<UploadBatchRecord>
   ) => {
     setUploadBatches((prev) =>
       prev.map((b) => (b.batch_id === batchId ? { ...b, ...patch } : b))
+    );
+  };
+
+  const updateQueuedFile = (
+    queueId: string,
+    patch: Partial<{
+      title: string;
+      citation_code: string;
+      status: 'queued' | 'uploading' | 'vectorizing' | 'done' | 'failed';
+      progress: number;
+      step_label: string;
+      sections_created: number;
+      vectors_indexed: number;
+      quarantined_count: number;
+      error: string;
+    }>
+  ) => {
+    setQueuedFiles((prev) =>
+      prev.map((q) => (q.queue_id === queueId ? { ...q, ...patch } : q))
     );
   };
 
@@ -250,60 +419,210 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
     setUploading(true);
     setUploadError(null);
     setUploadResult(null);
+    setBatchSummaryNote(null);
 
+    const pendingFiles = queuedFiles.filter((q) => q.status === 'queued' || q.status === 'failed');
     const batchNumber = ++batchCounterRef.current;
     const batchId = `batch-${batchNumber}-${Date.now()}`;
-    const batchLabel = selectedFile?.name || title.trim() || citationCode.trim() || 'Policy Batch';
+    const useMultiQueue = pendingFiles.length > 0 && rawText.trim().length === 0;
+
+    const batchLabel = useMultiQueue
+      ? pendingFiles.length === 1
+        ? pendingFiles[0].file.name
+        : `${pendingFiles.length} files (${pendingFiles[0].file.name}, ...)`
+      : title.trim() || citationCode.trim() || 'Policy Batch';
+
+    const startedAt = new Date().toISOString();
+    const initialTarget = runtime?.qdrant.reachable
+      ? `Live Qdrant HTTP + Local Index`
+      : 'Embedded Vector Index';
+    const initialEmbed = runtime?.ollama.available
+      ? `Ollama (${runtime.ollama.embed_model})`
+      : 'Deterministic 768-dim fallback';
+
     setUploadBatches((prev) => [
       {
         batch_id: batchId,
         batch_number: batchNumber,
         label: batchLabel,
         status: 'uploading',
-        progress: 12,
-        detail: 'Uploading payload...',
+        progress: 10,
+        detail: useMultiQueue
+          ? `Starting ${pendingFiles.length} file(s)...`
+          : 'Uploading payload...',
+        started_at: startedAt,
+        completed_at: null,
+        file_count: useMultiQueue ? pendingFiles.length : 1,
+        succeeded_count: 0,
+        failed_count: 0,
+        sections_created: 0,
+        vectors_indexed: 0,
+        quarantined_count: 0,
+        qdrant_target: initialTarget,
+        embedding_source: initialEmbed,
+        items: [],
       },
-      ...prev.slice(0, 5),
+      ...prev.slice(0, 49),
     ]);
 
     try {
-      if (selectedFile && rawText.trim().length === 0) {
-        const form = new FormData();
-        form.append('file', selectedFile);
-        form.append('title', title);
-        form.append('citation_code', citationCode);
-        form.append('sensitivity', sensitivity);
-        form.append('effective_from', `${effectiveFrom}T00:00:00Z`);
-        if (versionLabel.trim()) form.append('version_label', versionLabel.trim());
+      if (useMultiQueue) {
+        let succeeded = 0;
+        let failed = 0;
+        let totalSections = 0;
+        let totalVectors = 0;
+        let totalQuarantined = 0;
+        let lastDocId: string | null = null;
+        let lastUpload: UploadDocumentResult | null = null;
+        const batchItems: UploadBatchItemRecord[] = [];
 
-        const { data } = await postFormDataWithProgress<{
-          upload: UploadDocumentResult;
-          snapshot?: LedgerSnapshot;
-        }>('/api/admin/upload-file', form, (pct, phase) => {
-          updateUploadBatch(batchId, {
-            status: phase,
-            progress: pct,
-            detail:
-              phase === 'uploading'
-                ? 'Uploading file to server...'
-                : 'Extracting pages & vectorizing to Qdrant...',
+        for (let idx = 0; idx < pendingFiles.length; idx += 1) {
+          const item = pendingFiles[idx];
+          const itemTitle =
+            pendingFiles.length === 1 && title.trim() ? title.trim() : item.title.trim();
+          const itemCitation =
+            pendingFiles.length === 1 && citationCode.trim()
+              ? citationCode.trim()
+              : item.citation_code.trim();
+
+          updateQueuedFile(item.queue_id, {
+            status: 'uploading',
+            progress: 15,
+            step_label: 'Uploading file bytes...',
+            error: undefined,
           });
-        });
 
-        updateUploadBatch(batchId, {
-          status: 'success',
-          progress: 100,
-          detail: `${data.upload.parent_chunks_created} sec · ${data.upload.child_chunks_indexed} vec${
-            data.upload.quarantined_count > 0 ? ` · ${data.upload.quarantined_count} held` : ''
-          }`,
-        });
-        setUploadResult(data.upload);
-        setSelectedFile(null);
-        setPreviewNote(null);
-        if (data.snapshot) {
-          onSnapshotUpdate(data.snapshot);
+          try {
+            const form = new FormData();
+            form.append('file', item.file);
+            form.append('title', itemTitle);
+            form.append('citation_code', itemCitation);
+            form.append('sensitivity', sensitivity);
+            form.append('effective_from', `${effectiveFrom}T00:00:00Z`);
+            if (versionLabel.trim()) form.append('version_label', versionLabel.trim());
+
+            const { data } = await postFormDataWithProgress<{
+              upload: UploadDocumentResult;
+              snapshot?: LedgerSnapshot;
+            }>('/api/admin/upload-file', form, (pct, phase) => {
+              const overallPct = Math.round(
+                ((idx + pct / 100) / pendingFiles.length) * 100
+              );
+              updateQueuedFile(item.queue_id, {
+                status: phase,
+                progress: pct,
+                step_label:
+                  phase === 'uploading'
+                    ? 'Uploading file to server...'
+                    : 'Parsing PDF/DOCX pages & vectorizing into Qdrant...',
+              });
+              updateUploadBatch(batchId, {
+                status: phase,
+                progress: Math.max(12, Math.min(96, overallPct)),
+                detail: `File ${idx + 1}/${pendingFiles.length}: ${item.file.name} (${
+                  phase === 'uploading' ? 'Uploading' : 'Vectorizing'
+                })`,
+              });
+            });
+
+            succeeded += 1;
+            totalSections += data.upload.parent_chunks_created;
+            totalVectors += data.upload.child_chunks_indexed;
+            totalQuarantined += data.upload.quarantined_count;
+            lastDocId = data.upload.doc_id;
+            lastUpload = data.upload;
+            batchItems.push({
+              filename: item.file.name,
+              title: data.upload.title,
+              citation_code: data.upload.citation_code,
+              status: 'done',
+              sections_created: data.upload.parent_chunks_created,
+              vectors_indexed: data.upload.child_chunks_indexed,
+              quarantined_count: data.upload.quarantined_count,
+              embedding_source: data.upload.embedding_source,
+              qdrant_target: data.upload.qdrant_target,
+            });
+
+            updateQueuedFile(item.queue_id, {
+              status: 'done',
+              progress: 100,
+              step_label: `${data.upload.parent_chunks_created} sec · ${data.upload.child_chunks_indexed} vec`,
+              sections_created: data.upload.parent_chunks_created,
+              vectors_indexed: data.upload.child_chunks_indexed,
+              quarantined_count: data.upload.quarantined_count,
+            });
+            if (data.snapshot) {
+              onSnapshotUpdate(data.snapshot);
+            }
+          } catch (itemErr) {
+            failed += 1;
+            const errMsg = itemErr instanceof Error ? itemErr.message : 'Processing failed.';
+            batchItems.push({
+              filename: item.file.name,
+              title: itemTitle,
+              citation_code: itemCitation,
+              status: 'failed',
+              sections_created: 0,
+              vectors_indexed: 0,
+              quarantined_count: 0,
+              error: errMsg,
+            });
+            updateQueuedFile(item.queue_id, {
+              status: 'failed',
+              progress: 100,
+              step_label: 'Failed',
+              error: errMsg,
+            });
+          }
         }
-        void loadDocumentPreview(data.upload.doc_id);
+
+        if (lastUpload) setUploadResult(lastUpload);
+        if (lastDocId) void loadDocumentPreview(lastDocId);
+        setPreviewNote(null);
+
+        const completedAt = new Date().toISOString();
+        if (failed === 0) {
+          updateUploadBatch(batchId, {
+            status: 'success',
+            progress: 100,
+            completed_at: completedAt,
+            succeeded_count: succeeded,
+            failed_count: failed,
+            sections_created: totalSections,
+            vectors_indexed: totalVectors,
+            quarantined_count: totalQuarantined,
+            qdrant_target: lastUpload?.qdrant_target ?? initialTarget,
+            embedding_source: lastUpload?.embedding_source ?? initialEmbed,
+            items: batchItems,
+            detail: `${succeeded}/${pendingFiles.length} file(s) · ${totalSections} sec · ${totalVectors} vec${
+              totalQuarantined > 0 ? ` · ${totalQuarantined} held` : ''
+            }`,
+          });
+          if (pendingFiles.length > 1) {
+            setBatchSummaryNote(
+              `Batch complete: ${succeeded} document(s) indexed (${totalSections} parent sections, ${totalVectors} Qdrant vector points${
+                totalQuarantined > 0 ? `, ${totalQuarantined} held` : ''
+              }).`
+            );
+          }
+        } else {
+          const msg = `${succeeded} succeeded, ${failed} failed (${totalVectors} Qdrant vectors indexed).`;
+          updateUploadBatch(batchId, {
+            status: 'failed',
+            progress: 100,
+            completed_at: completedAt,
+            succeeded_count: succeeded,
+            failed_count: failed,
+            sections_created: totalSections,
+            vectors_indexed: totalVectors,
+            quarantined_count: totalQuarantined,
+            qdrant_target: lastUpload?.qdrant_target ?? initialTarget,
+            embedding_source: lastUpload?.embedding_source ?? initialEmbed,
+            items: batchItems,
+            detail: msg,
+          });
+          setUploadError(msg);
+        }
       } else {
         updateUploadBatch(batchId, {
           status: 'vectorizing',
@@ -328,12 +647,32 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
         updateUploadBatch(batchId, {
           status: 'success',
           progress: 100,
+          completed_at: new Date().toISOString(),
+          succeeded_count: 1,
+          failed_count: 0,
+          sections_created: data.upload.parent_chunks_created,
+          vectors_indexed: data.upload.child_chunks_indexed,
+          quarantined_count: data.upload.quarantined_count,
+          qdrant_target: data.upload.qdrant_target,
+          embedding_source: data.upload.embedding_source,
+          items: [
+            {
+              filename: data.upload.source_filename ?? 'manual-policy-text',
+              title: data.upload.title,
+              citation_code: data.upload.citation_code,
+              status: 'done',
+              sections_created: data.upload.parent_chunks_created,
+              vectors_indexed: data.upload.child_chunks_indexed,
+              quarantined_count: data.upload.quarantined_count,
+              embedding_source: data.upload.embedding_source,
+              qdrant_target: data.upload.qdrant_target,
+            },
+          ],
           detail: `${data.upload.parent_chunks_created} sec · ${data.upload.child_chunks_indexed} vec${
             data.upload.quarantined_count > 0 ? ` · ${data.upload.quarantined_count} held` : ''
           }`,
         });
         setUploadResult(data.upload);
-        setSelectedFile(null);
         setPreviewNote(null);
         if (data.snapshot) {
           onSnapshotUpdate(data.snapshot);
@@ -345,6 +684,8 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
       updateUploadBatch(batchId, {
         status: 'failed',
         progress: 100,
+        completed_at: new Date().toISOString(),
+        failed_count: 1,
         detail: msg,
       });
       setUploadError(msg);
@@ -370,13 +711,16 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
     setCorpusActionBusy(true);
     setUploadError(null);
     setUploadResult(null);
+    setBulkActionNote(null);
     try {
       const { data } = await safeFetchJson<{ snapshot?: LedgerSnapshot }>('/api/admin/clear-samples', {
         method: 'POST',
       });
+      attemptedAutoSummarizeRef.current.clear();
       if (data.snapshot) onSnapshotUpdate(data.snapshot);
       setSelectedPreviewDocId(null);
       setPreviewData(null);
+      setSelectedDocIds([]);
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : 'Unable to clear library.');
     } finally {
@@ -388,15 +732,18 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
     setCorpusActionBusy(true);
     setUploadError(null);
     setUploadResult(null);
+    setBulkActionNote(null);
     try {
       const { data } = await safeFetchJson<{ snapshot?: LedgerSnapshot }>('/api/admin/reset', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ empty: false }),
       });
+      attemptedAutoSummarizeRef.current.clear();
       if (data.snapshot) onSnapshotUpdate(data.snapshot);
       setSelectedPreviewDocId(null);
       setPreviewData(null);
+      setSelectedDocIds([]);
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : 'Unable to restore starter corpus.');
     } finally {
@@ -412,6 +759,7 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
         { method: 'DELETE' }
       );
       if (data.snapshot) onSnapshotUpdate(data.snapshot);
+      setSelectedDocIds((prev) => prev.filter((id) => id !== docId));
       if (selectedPreviewDocId === docId) {
         setSelectedPreviewDocId(null);
         setPreviewData(null);
@@ -421,6 +769,97 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
     } finally {
       setDeletingDocId(null);
     }
+  };
+
+  const toggleDocSelection = (docId: string) => {
+    setSelectedDocIds((prev) =>
+      prev.includes(docId) ? prev.filter((id) => id !== docId) : [...prev, docId]
+    );
+  };
+
+  const toggleSelectAllVisible = () => {
+    const visibleIds = filteredDocuments.map((d) => d.doc_id);
+    if (visibleIds.length === 0) return;
+    if (allVisibleSelected) {
+      const visibleSet = new Set(visibleIds);
+      setSelectedDocIds((prev) => prev.filter((id) => !visibleSet.has(id)));
+    } else {
+      setSelectedDocIds((prev) => Array.from(new Set([...prev, ...visibleIds])));
+    }
+  };
+
+  const handleBulkDelete = async () => {
+    if (selectedDocIds.length === 0) return;
+    setBulkActionBusy('delete');
+    setBulkActionNote(null);
+    try {
+      const { data } = await safeFetchJson<{
+        deleted_count: number;
+        snapshot?: LedgerSnapshot;
+      }>('/api/admin/documents/bulk-delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ doc_ids: selectedDocIds }),
+      });
+      if (data.snapshot) onSnapshotUpdate(data.snapshot);
+      if (selectedPreviewDocId && selectedDocIds.includes(selectedPreviewDocId)) {
+        setSelectedPreviewDocId(null);
+        setPreviewData(null);
+      }
+      setSelectedDocIds([]);
+      setBulkActionNote(`Removed ${data.deleted_count} selected document(s) and pruned their Qdrant vectors.`);
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : 'Bulk delete failed.');
+    } finally {
+      setBulkActionBusy(null);
+    }
+  };
+
+  const handleBulkReprocess = async () => {
+    if (selectedDocIds.length === 0) return;
+    setBulkActionBusy('reprocess');
+    setBulkActionNote(null);
+    try {
+      const { data } = await safeFetchJson<{
+        reprocessed_count: number;
+        vector_points_synced: number;
+        snapshot?: LedgerSnapshot;
+      }>('/api/admin/documents/bulk-reprocess', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ doc_ids: selectedDocIds }),
+      });
+      if (data.snapshot) onSnapshotUpdate(data.snapshot);
+      if (selectedPreviewDocId && selectedDocIds.includes(selectedPreviewDocId)) {
+        void loadDocumentPreview(selectedPreviewDocId);
+      }
+      setBulkActionNote(
+        `Reprocessed ${data.reprocessed_count} document(s) through chunkDocumentPages() and synced ${data.vector_points_synced} Qdrant vector point(s).`
+      );
+      setSelectedDocIds([]);
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : 'Bulk reprocess failed.');
+    } finally {
+      setBulkActionBusy(null);
+    }
+  };
+
+  const handleDownloadAuditCsv = () => {
+    const { csv, rowCount, filename } = buildIngestionAuditCsv({
+      snapshot,
+      runtime,
+      uploadBatches,
+    });
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', filename);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setAuditExportNote(`Exported ${rowCount} audit trail row(s) (${uploadBatches.length} batch run(s), ${snapshot.documents.length} policy doc(s), ${snapshot.quarantine.length} Safety Hold item(s)) to ${filename}.`);
   };
 
   const pypdfLines = extractionExhibit.pypdf_garbled.split('\n');
@@ -451,6 +890,15 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
               </div>
             </div>
             <div className="flex flex-wrap items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={handleDownloadAuditCsv}
+                title="Download ingestion logs, rule versions, Safety Hold records, outbox events, and batch processing history as CSV"
+                className="inline-flex items-center gap-1.5 px-3 py-1 text-[11px] font-semibold text-emerald-200 bg-emerald-950/70 hover:bg-emerald-900/80 border border-emerald-500/50 rounded-md transition-colors whitespace-nowrap"
+              >
+                <Download className="w-3.5 h-3.5" />
+                Download Audit CSV
+              </button>
               <button
                 type="button"
                 onClick={() => setIsDbStatusOpen(true)}
@@ -485,9 +933,26 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
           </div>
         </div>
 
+        {auditExportNote && (
+          <div className="px-3.5 py-2 rounded-lg bg-emerald-950/60 border border-emerald-700/70 text-emerald-200 text-xs flex items-center justify-between gap-3">
+            <span>{auditExportNote}</span>
+            <button
+              type="button"
+              onClick={() => setAuditExportNote(null)}
+              aria-label="Dismiss CSV export confirmation"
+              className="text-emerald-300 hover:text-white shrink-0"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
         {/* Real-Time Upload & Vectorization Progress Indicator */}
         {(() => {
-          const latestBatch = uploadBatches[0] ?? null;
+          const visibleBatches = uploadBatches.filter(
+            (b) => b.batch_number > clearedBatchDisplayAfter
+          );
+          const latestBatch = visibleBatches[0] ?? null;
           return (
             <div
               aria-live="polite"
@@ -552,9 +1017,9 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
                 )}
               </div>
 
-              {uploadBatches.length > 0 && (
+              {visibleBatches.length > 0 && (
                 <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono tabular-nums">
-                  {uploadBatches.slice(0, 4).map((b) => (
+                  {visibleBatches.slice(0, 4).map((b) => (
                     <span
                       key={b.batch_id}
                       title={`${b.label}: ${b.detail}`}
@@ -579,7 +1044,7 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
                   {!uploading && (
                     <button
                       type="button"
-                      onClick={() => setUploadBatches([])}
+                      onClick={() => setClearedBatchDisplayAfter(batchCounterRef.current)}
                       className="text-slate-400 hover:text-white font-sans underline underline-offset-2 ml-1"
                     >
                       Clear
@@ -732,8 +1197,9 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
             <button
               type="button"
               onClick={() => {
-                setSelectedFile(null);
+                setQueuedFiles([]);
                 setPreviewNote(null);
+                setBatchSummaryNote(null);
                 setShowManualText(true);
                 setTitle(SAMPLE_CLEAN_POLICY.title);
                 setCitationCode(SAMPLE_CLEAN_POLICY.citation_code);
@@ -751,8 +1217,9 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
             <button
               type="button"
               onClick={() => {
-                setSelectedFile(null);
+                setQueuedFiles([]);
                 setPreviewNote(null);
+                setBatchSummaryNote(null);
                 setShowManualText(true);
                 setTitle(SAMPLE_BROKEN_TABLE_POLICY.title);
                 setCitationCode(SAMPLE_BROKEN_TABLE_POLICY.citation_code);
@@ -771,7 +1238,7 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
         </div>
 
         <form onSubmit={handleUploadSubmit} className="p-6 space-y-5">
-          {/* Step 1: Dropzone */}
+          {/* Step 1: Multi-File Drag & Drop Area + Visual Queue */}
           <div
             onDragOver={(e) => {
               e.preventDefault();
@@ -781,97 +1248,193 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
             onDrop={(e) => {
               e.preventDefault();
               setIsDraggingFile(false);
-              const dropped = e.dataTransfer.files?.[0];
-              if (dropped) acceptChosenFile(dropped);
+              if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                acceptChosenFiles(e.dataTransfer.files);
+              }
             }}
-            className={`rounded-xl border-2 border-dashed p-5 transition-colors ${
+            className={`rounded-xl border-2 border-dashed p-5 transition-colors space-y-4 ${
               isDraggingFile
                 ? 'border-blue-600 bg-blue-50/70'
-                : selectedFile
-                  ? 'border-emerald-400 bg-emerald-50/40'
+                : queuedFiles.length > 0
+                  ? 'border-emerald-400 bg-emerald-50/35'
                   : 'border-slate-300 bg-slate-50/80 hover:border-blue-400'
             }`}
           >
-            {selectedFile ? (
-              <div className="flex flex-wrap items-center justify-between gap-4">
-                <div className="flex items-center gap-3 min-w-0">
-                  <div className="w-10 h-10 rounded-lg bg-emerald-100 text-emerald-800 flex items-center justify-center shrink-0">
-                    <FileText className="w-5 h-5" />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="text-xs sm:text-sm font-semibold text-slate-950 truncate">
-                      {selectedFile.name}
-                    </div>
-                    <div className="text-[11px] text-slate-600 font-mono">
-                      {formatBytes(selectedFile.size)} · Ready for automatic extraction &amp; Qdrant indexing
-                    </div>
-                  </div>
+            <label className="flex flex-col sm:flex-row items-center justify-between gap-4 cursor-pointer">
+              <div className="flex items-center gap-3.5 text-center sm:text-left">
+                <div className="w-11 h-11 rounded-lg bg-blue-100 text-blue-700 flex items-center justify-center shrink-0">
+                  <Upload className="w-5 h-5" />
                 </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    disabled={previewingFile}
-                    onClick={() => void handlePreviewSelectedFile()}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-800 bg-white border border-slate-300 hover:bg-slate-100 rounded-md transition-colors disabled:opacity-50"
-                  >
-                    <Eye className="w-3.5 h-3.5" />
-                    {previewingFile ? 'Converting...' : 'Preview Extracted Text'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSelectedFile(null);
-                      setPreviewNote(null);
-                    }}
-                    className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:text-rose-700 bg-white border border-slate-300 rounded-md transition-colors"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                    Clear
-                  </button>
+                <div>
+                  <div className="text-xs sm:text-sm font-semibold text-slate-950">
+                    {queuedFiles.length > 0
+                      ? `${queuedFiles.length} file${queuedFiles.length === 1 ? '' : 's'} in batch queue — drop more PDF or DOCX files to append`
+                      : 'Drag & drop multiple PDF, Word (.docx), or policy files here, or click to browse'}
+                  </div>
+                  <div className="mt-0.5 text-[11px] text-slate-600">
+                    Simultaneous multi-file support for <strong>.pdf</strong>, <strong>.docx</strong>, <strong>.csv</strong> / <strong>.tsv</strong>, <strong>.html</strong>, <strong>.json</strong>, <strong>.rtf</strong>, <strong>.md</strong>, and <strong>.txt</strong> (max 15 MB per file).
+                  </div>
                 </div>
               </div>
-            ) : (
-              <label className="flex flex-col sm:flex-row items-center justify-between gap-4 cursor-pointer">
-                <div className="flex items-center gap-3.5 text-center sm:text-left">
-                  <div className="w-11 h-11 rounded-lg bg-blue-100 text-blue-700 flex items-center justify-center shrink-0">
-                    <Upload className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <div className="text-xs sm:text-sm font-semibold text-slate-950">
-                      Drag &amp; drop your policy file here, or click to browse
-                    </div>
-                    <div className="mt-0.5 text-[11px] text-slate-600">
-                      Accepts <strong>.pdf</strong>, <strong>.docx</strong> (Word), <strong>.csv</strong> / <strong>.tsv</strong>, <strong>.html</strong>, <strong>.json</strong>, <strong>.rtf</strong>, <strong>.md</strong>, and <strong>.txt</strong> (max 15 MB) — no manual formatting needed.
-                    </div>
+              <span className="px-4 py-2 text-xs font-semibold text-blue-800 bg-white border border-blue-300 rounded-lg hover:bg-blue-50 transition-colors whitespace-nowrap shrink-0">
+                {queuedFiles.length > 0 ? 'Add More Files' : 'Choose Files'}
+              </span>
+              <input
+                type="file"
+                multiple
+                accept=".pdf,.docx,.txt,.md,.markdown,.csv,.tsv,.html,.htm,.json,.rtf"
+                onChange={handleFileLoad}
+                className="hidden"
+              />
+            </label>
+
+            {/* Visual Batch Processing & Vectorization Queue */}
+            {queuedFiles.length > 0 && (
+              <div className="pt-3 border-t border-slate-200/80 space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                  <span className="font-semibold text-slate-900">
+                    Batch Processing &amp; Vectorization Queue ({queuedFiles.filter((q) => q.status === 'done').length}/{queuedFiles.length} completed)
+                  </span>
+                  <div className="flex items-center gap-2">
+                    {queuedFiles.length === 1 && queuedFiles[0].status === 'queued' && (
+                      <button
+                        type="button"
+                        disabled={previewingFile}
+                        onClick={() => void handlePreviewSelectedFile()}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-slate-800 bg-white border border-slate-300 hover:bg-slate-100 rounded transition-colors disabled:opacity-50"
+                      >
+                        <Eye className="w-3 h-3" />
+                        {previewingFile ? 'Converting...' : 'Preview Extracted Text'}
+                      </button>
+                    )}
+                    {!uploading && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setQueuedFiles([]);
+                          setPreviewNote(null);
+                          setBatchSummaryNote(null);
+                        }}
+                        className="text-slate-600 hover:text-rose-700 underline underline-offset-2"
+                      >
+                        Clear Queue
+                      </button>
+                    )}
                   </div>
                 </div>
-                <span className="px-4 py-2 text-xs font-semibold text-blue-800 bg-white border border-blue-300 rounded-lg hover:bg-blue-50 transition-colors whitespace-nowrap shrink-0">
-                  Choose File
-                </span>
-                <input
-                  type="file"
-                  accept=".pdf,.docx,.txt,.md,.markdown,.csv,.tsv,.html,.htm,.json,.rtf"
-                  onChange={handleFileLoad}
-                  className="hidden"
-                />
-              </label>
+
+                <div className="space-y-2 max-h-72 overflow-y-auto pr-0.5">
+                  {queuedFiles.map((item, idx) => (
+                    <div
+                      key={item.queue_id}
+                      className="p-3 bg-white border border-slate-200 rounded-lg space-y-2 shadow-2xs"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                          <div
+                            className={`w-7 h-7 rounded-md flex items-center justify-center shrink-0 ${
+                              item.status === 'done'
+                                ? 'bg-emerald-100 text-emerald-700'
+                                : item.status === 'failed'
+                                  ? 'bg-rose-100 text-rose-700'
+                                  : item.status === 'uploading' || item.status === 'vectorizing'
+                                    ? 'bg-blue-100 text-blue-700'
+                                    : 'bg-slate-100 text-slate-700'
+                            }`}
+                          >
+                            {item.status === 'uploading' || item.status === 'vectorizing' ? (
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                            ) : item.status === 'done' ? (
+                              <CheckCircle2 className="w-4 h-4" />
+                            ) : item.status === 'failed' ? (
+                              <AlertCircle className="w-4 h-4" />
+                            ) : (
+                              <FileText className="w-4 h-4" />
+                            )}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="text-xs font-semibold text-slate-950 truncate">
+                              {idx + 1}. {item.file.name}
+                            </div>
+                            <div className="text-[11px] font-mono tabular-nums text-slate-500">
+                              {formatBytes(item.file.size)} · {item.citation_code} ·{' '}
+                              <span
+                                className={
+                                  item.status === 'done'
+                                    ? 'text-emerald-700 font-semibold'
+                                    : item.status === 'failed'
+                                      ? 'text-rose-700 font-semibold'
+                                      : item.status === 'uploading' || item.status === 'vectorizing'
+                                        ? 'text-blue-700 font-semibold'
+                                        : 'text-slate-600'
+                                }
+                              >
+                                {item.error ? `Failed: ${item.error}` : item.step_label}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className="text-[11px] font-mono tabular-nums font-semibold text-slate-700">
+                            {item.progress}%
+                          </span>
+                          {!uploading && (
+                            <button
+                              type="button"
+                              aria-label={`Remove ${item.file.name} from queue`}
+                              onClick={() =>
+                                setQueuedFiles((prev) =>
+                                  prev.filter((q) => q.queue_id !== item.queue_id)
+                                )
+                              }
+                              className="p-1 text-slate-400 hover:text-rose-700 rounded transition-colors"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Pipeline Step Bar */}
+                      <div className="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
+                        <div
+                          style={{ width: `${item.progress}%` }}
+                          className={`h-full transition-all duration-200 ${
+                            item.status === 'done'
+                              ? 'bg-emerald-600'
+                              : item.status === 'failed'
+                                ? 'bg-rose-600'
+                                : 'bg-blue-600'
+                          }`}
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
             )}
           </div>
 
-          {/* Step 2: Simple Document Details */}
+          {/* Step 2: Document Details (applied to single file or batch tier/effective date) */}
           <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
             <div className="md:col-span-5 space-y-1">
               <label htmlFor="upload-title" className="block text-xs font-semibold text-slate-800">
-                Policy Document Title
+                {queuedFiles.length > 1 ? 'Batch Title Mode' : 'Policy Document Title'}
               </label>
               <input
                 id="upload-title"
                 type="text"
-                required
-                value={title}
+                required={queuedFiles.length <= 1}
+                disabled={queuedFiles.length > 1}
+                value={
+                  queuedFiles.length > 1
+                    ? `Auto-derived from each file name (${queuedFiles.length} files queued)`
+                    : title
+                }
                 onChange={(e) => setTitle(e.target.value)}
                 placeholder="Auto-filled from file name (or type a custom title)"
-                className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-lg text-slate-950 focus:bg-white focus:outline-none focus:border-blue-700"
+                className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-lg text-slate-950 focus:bg-white focus:outline-none focus:border-blue-700 disabled:text-slate-500"
               />
             </div>
 
@@ -882,11 +1445,12 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
               <input
                 id="upload-citation"
                 type="text"
-                required
-                value={citationCode}
+                required={queuedFiles.length <= 1}
+                disabled={queuedFiles.length > 1}
+                value={queuedFiles.length > 1 ? 'Auto-derived per file' : citationCode}
                 onChange={(e) => setCitationCode(e.target.value)}
                 placeholder="e.g., CBK/GREEN/2026/04"
-                className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-300 rounded-lg text-slate-950 focus:bg-white focus:outline-none focus:border-blue-700"
+                className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-300 rounded-lg text-slate-950 focus:bg-white focus:outline-none focus:border-blue-700 disabled:text-slate-500"
               />
             </div>
 
@@ -946,7 +1510,7 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
                 rows={5}
                 value={rawText}
                 onChange={(e) => setRawText(e.target.value)}
-                placeholder="Optional: paste policy text here if you are not uploading a file, or inspect/edit converted text..."
+                placeholder="Optional: paste policy text here if you are not uploading files, or inspect/edit converted text..."
                 className="w-full px-3.5 py-2.5 text-xs font-mono bg-slate-50 border border-slate-300 rounded-lg text-slate-950 focus:bg-white focus:outline-none focus:border-blue-700"
               />
             )}
@@ -960,14 +1524,17 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
               type="submit"
               disabled={
                 uploading ||
-                !title.trim() ||
-                !citationCode.trim() ||
-                (!selectedFile && rawText.trim().length < 20)
+                (queuedFiles.filter((q) => q.status === 'queued' || q.status === 'failed').length === 0 &&
+                  (!title.trim() || !citationCode.trim() || rawText.trim().length < 20))
               }
               className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-semibold text-white bg-blue-700 hover:bg-blue-800 disabled:opacity-50 rounded-lg transition-colors whitespace-nowrap shadow-xs"
             >
               <Upload className="w-3.5 h-3.5" />
-              {uploading ? 'Processing & Indexing Into Qdrant...' : 'Process & Index Into Qdrant'}
+              {uploading
+                ? 'Processing & Vectorizing Batch...'
+                : queuedFiles.filter((q) => q.status === 'queued' || q.status === 'failed').length > 1
+                  ? `Process & Vectorize ${queuedFiles.filter((q) => q.status === 'queued' || q.status === 'failed').length} Files Into Qdrant`
+                  : 'Process & Index Into Qdrant'}
             </button>
           </div>
 
@@ -977,7 +1544,13 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
             </div>
           )}
 
-          {uploadResult && (
+          {batchSummaryNote && (
+            <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-950">
+              <strong>Multi-file batch complete:</strong> {batchSummaryNote}
+            </div>
+          )}
+
+          {uploadResult && !batchSummaryNote && (
             <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-950 flex flex-wrap items-center justify-between gap-4">
               <div className="space-y-1">
                 <div className="font-semibold inline-flex items-center gap-1.5">
@@ -1062,10 +1635,35 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
           </div>
         </div>
 
+        {bulkActionNote && (
+          <div className="px-6 py-3 bg-blue-50 border-b border-blue-200 flex items-center justify-between gap-3 text-xs text-blue-950">
+            <span>{bulkActionNote}</span>
+            <button
+              type="button"
+              onClick={() => setBulkActionNote(null)}
+              aria-label="Dismiss bulk action message"
+              className="text-blue-700 hover:text-blue-950"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs">
             <thead className="bg-slate-900 text-slate-100">
               <tr>
+                <th className="py-2.5 pl-4 pr-2 w-10">
+                  <input
+                    ref={selectAllCheckboxRef}
+                    type="checkbox"
+                    aria-label="Select all visible policy documents"
+                    disabled={filteredDocuments.length === 0}
+                    checked={allVisibleSelected}
+                    onChange={toggleSelectAllVisible}
+                    className="w-3.5 h-3.5 rounded border-slate-500 accent-blue-500 cursor-pointer"
+                  />
+                </th>
                 <th className="py-2.5 px-4 font-semibold">Policy Title</th>
                 <th className="py-2.5 px-4 font-semibold">Code</th>
                 <th className="py-2.5 px-4 font-semibold">Access Level</th>
@@ -1078,7 +1676,7 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
             <tbody className="divide-y divide-slate-200 bg-white">
               {filteredDocuments.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="py-8 px-4 text-center text-xs text-slate-500">
+                  <td colSpan={8} className="py-8 px-4 text-center text-xs text-slate-500">
                     {snapshot.documents.length === 0
                       ? 'Library is currently empty. Drop your own PDF, DOCX, CSV, HTML, JSON, RTF, or TXT file above to index real documents from scratch — or click "Restore Starter Corpus".'
                       : 'No policies match your current search or access tier filter.'}
@@ -1087,16 +1685,34 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
               ) : (
                 filteredDocuments.map((doc) => {
                   const isPreviewSelected = selectedPreviewDocId === doc.doc_id;
+                  const isChecked = selectedDocIds.includes(doc.doc_id);
+                  const isSummarizing = summarizingDocIds.includes(doc.doc_id);
                   return (
                     <tr
                       key={doc.doc_id}
                       onClick={() => void loadDocumentPreview(doc.doc_id, undefined, true)}
                       className={`cursor-pointer transition-colors ${
-                        isPreviewSelected ? 'bg-blue-50/85' : 'hover:bg-slate-50/80'
+                        isChecked
+                          ? 'bg-blue-50/70'
+                          : isPreviewSelected
+                            ? 'bg-blue-50/85'
+                            : 'hover:bg-slate-50/80'
                       }`}
                     >
-                      <td className="py-3 px-4">
-                        <div className="font-medium text-slate-950 flex items-center gap-2">
+                      <td
+                        className="py-3 pl-4 pr-2 align-top"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <input
+                          type="checkbox"
+                          aria-label={`Select ${doc.title}`}
+                          checked={isChecked}
+                          onChange={() => toggleDocSelection(doc.doc_id)}
+                          className="w-3.5 h-3.5 mt-0.5 rounded border-slate-300 accent-blue-700 cursor-pointer"
+                        />
+                      </td>
+                      <td className="py-3 px-4 align-top max-w-xl">
+                        <div className="font-medium text-slate-950 flex items-center gap-2 flex-wrap">
                           <span>{doc.title}</span>
                           {isPreviewSelected && (
                             <span className="text-[10px] font-semibold text-blue-700">
@@ -1117,29 +1733,88 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
                           <span aria-hidden="true"> · </span>
                           <span>Indexed {doc.created_at.slice(0, 10)}</span>
                         </div>
+
+                        {/* 2-3 Sentence AI Document Summary */}
+                        <div className="mt-2 pt-2 border-t border-slate-200/80">
+                          {isSummarizing ? (
+                            <div className="inline-flex items-center gap-1.5 text-[11px] text-blue-700 font-medium">
+                              <Loader2 className="w-3 h-3 animate-spin shrink-0" />
+                              Generating 2–3 sentence AI summary...
+                            </div>
+                          ) : doc.ai_summary ? (
+                            <div className="space-y-1">
+                              <p className="text-[11.5px] leading-relaxed text-slate-700 whitespace-normal">
+                                {doc.ai_summary}
+                              </p>
+                              <div className="flex flex-wrap items-center gap-2 text-[10px] text-slate-500 font-mono">
+                                <span className="inline-flex items-center gap-1 text-blue-700 font-sans font-semibold">
+                                  <Sparkles className="w-3 h-3" />
+                                  AI Summary
+                                </span>
+                                {doc.ai_summary_model && (
+                                  <>
+                                    <span aria-hidden="true">·</span>
+                                    <span>{doc.ai_summary_model}</span>
+                                  </>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    void summarizeDocument(doc.doc_id, true);
+                                  }}
+                                  className="font-sans text-slate-500 hover:text-blue-700 underline underline-offset-2"
+                                >
+                                  Regenerate
+                                </button>
+                              </div>
+                            </div>
+                          ) : doc.ai_summary_error ? (
+                            <div className="flex flex-wrap items-center gap-2 text-[11px] text-rose-700">
+                              <span className="truncate max-w-md" title={doc.ai_summary_error}>
+                                AI summary unavailable: {doc.ai_summary_error}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void summarizeDocument(doc.doc_id, true);
+                                }}
+                                className="font-semibold text-blue-700 hover:text-blue-900 underline underline-offset-2 shrink-0"
+                              >
+                                Retry Summary
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="inline-flex items-center gap-1.5 text-[11px] text-slate-500">
+                              <Sparkles className="w-3 h-3 text-slate-400 shrink-0" />
+                              <span>Queued for AI summary...</span>
+                            </div>
+                          )}
+                        </div>
                       </td>
-                      <td className="py-3 px-4 font-mono text-slate-700 whitespace-nowrap">{doc.citation_code}</td>
-                      <td className="py-3 px-4 text-slate-700 whitespace-nowrap">
+                      <td className="py-3 px-4 align-top font-mono text-slate-700 whitespace-nowrap">{doc.citation_code}</td>
+                      <td className="py-3 px-4 align-top text-slate-700 whitespace-nowrap">
                         {SENSITIVITY_LABELS[doc.sensitivity]}
                       </td>
-                      <td className="py-3 px-4 font-mono text-[11px] text-slate-700 whitespace-nowrap">
+                      <td className="py-3 px-4 align-top font-mono text-[11px] text-slate-700 whitespace-nowrap">
                         {doc.parent_section_count} section{doc.parent_section_count === 1 ? '' : 's'} · {doc.vector_point_count} vector{doc.vector_point_count === 1 ? '' : 's'}
                       </td>
-                      <td className="py-3 px-4 font-mono text-[11px] text-slate-600">
+                      <td className="py-3 px-4 align-top font-mono text-[11px] text-slate-600">
                         {doc.versions.map((v) => (
                           <div key={v.version_id}>
                             {v.version_label} ({v.effective_from.slice(0, 10)} → {v.effective_to ? v.effective_to.slice(0, 10) : 'Present'})
                           </div>
                         ))}
                       </td>
-                      <td className="py-3 px-4 whitespace-nowrap font-semibold">
+                      <td className="py-3 px-4 align-top whitespace-nowrap font-semibold">
                         {doc.acl_in_sync ? (
                           <span className="text-emerald-700">Synced</span>
                         ) : (
                           <span className="text-amber-700">Pending Sync</span>
                         )}
                       </td>
-                      <td className="py-3 px-4 text-right whitespace-nowrap">
+                      <td className="py-3 px-4 align-top text-right whitespace-nowrap">
                         <div className="inline-flex items-center justify-end gap-1.5">
                           <button
                             type="button"
@@ -1568,6 +2243,48 @@ export const IngestionQuarantineView: React.FC<IngestionQuarantineViewProps> = (
         onClearSamples={() => void handleClearSamples()}
         onRestoreCorpus={() => void handleRestoreCorpus()}
       />
+
+      {/* Floating Bulk Action Bar */}
+      {selectedDocIds.length > 0 && (
+        <div
+          role="region"
+          aria-label="Bulk document actions"
+          className="fixed bottom-5 left-1/2 -translate-x-1/2 z-40 px-4 py-2.5 bg-slate-900 text-white border border-slate-700 rounded-xl shadow-2xl flex flex-wrap items-center gap-3 text-xs max-w-[95vw]"
+        >
+          <span className="font-mono tabular-nums font-semibold text-blue-300 whitespace-nowrap">
+            {selectedDocIds.length} document{selectedDocIds.length === 1 ? '' : 's'} selected
+          </span>
+          <span className="h-4 w-px bg-slate-700 hidden sm:inline-block" aria-hidden="true" />
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={bulkActionBusy !== null}
+              onClick={() => void handleBulkReprocess()}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-500 rounded-lg transition-colors disabled:opacity-50 whitespace-nowrap"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${bulkActionBusy === 'reprocess' ? 'animate-spin' : ''}`} />
+              {bulkActionBusy === 'reprocess' ? 'Reprocessing...' : 'Bulk Reprocess'}
+            </button>
+            <button
+              type="button"
+              disabled={bulkActionBusy !== null}
+              onClick={() => void handleBulkDelete()}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-500 rounded-lg transition-colors disabled:opacity-50 whitespace-nowrap"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              {bulkActionBusy === 'delete' ? 'Deleting...' : 'Bulk Delete'}
+            </button>
+            <button
+              type="button"
+              disabled={bulkActionBusy !== null}
+              onClick={() => setSelectedDocIds([])}
+              className="px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:text-white transition-colors whitespace-nowrap"
+            >
+              Clear Selection
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

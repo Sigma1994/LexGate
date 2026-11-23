@@ -141,6 +141,122 @@ export class RegulatoryLedger {
     return { deleted: true, deletedChunkIds };
   }
 
+  public bulkDeleteDocuments(docIds: string[]): {
+    deletedCount: number;
+    deletedChunkIds: string[];
+  } {
+    const allDeletedChunkIds: string[] = [];
+    let deletedCount = 0;
+    for (const id of docIds) {
+      const outcome = this.deleteDocument(id);
+      if (outcome.deleted) {
+        deletedCount += 1;
+        allDeletedChunkIds.push(...outcome.deletedChunkIds);
+      }
+    }
+    return { deletedCount, deletedChunkIds: allDeletedChunkIds };
+  }
+
+  public reprocessDocuments(docIds: string[]): {
+    reprocessedCount: number;
+    removedChunkIds: string[];
+    upsertedPoints: QdrantPoint[];
+  } {
+    const targetIds = new Set(docIds);
+    const nowIso = new Date().toISOString();
+    const removedChunkIds: string[] = [];
+    const upsertedPoints: QdrantPoint[] = [];
+    let reprocessedCount = 0;
+
+    for (const doc of this.documents) {
+      if (!targetIds.has(doc.doc_id)) continue;
+      const docVersions = this.versions.filter((v) => v.doc_id === doc.doc_id);
+      if (docVersions.length === 0) continue;
+
+      reprocessedCount += 1;
+      const runId = crypto.randomUUID();
+
+      for (const ver of docVersions) {
+        const existingParents = this.chunks
+          .filter((c) => c.version_id === ver.version_id && c.chunk_tier === 'parent')
+          .sort((a, b) => a.page_number - b.page_number);
+        const existingChildren = this.chunks.filter(
+          (c) => c.version_id === ver.version_id && c.chunk_tier === 'child'
+        );
+
+        for (const ch of existingChildren) {
+          removedChunkIds.push(ch.chunk_id);
+          this.qdrantPoints.delete(ch.chunk_id);
+        }
+
+        const pageMap = new Map<number, string[]>();
+        for (const p of existingParents) {
+          const list = pageMap.get(p.page_number) ?? [];
+          list.push(p.text_content);
+          pageMap.set(p.page_number, list);
+        }
+        const pagesToRechunk: PageInput[] = Array.from(pageMap.entries())
+          .sort((a, b) => a[0] - b[0])
+          .map(([page_number, texts]) => ({
+            page_number,
+            text: texts.join('\n\n'),
+          }));
+
+        if (pagesToRechunk.length === 0) continue;
+
+        this.chunks = this.chunks.filter((c) => c.version_id !== ver.version_id);
+
+        const chunked = chunkDocumentPages({
+          doc_id: doc.doc_id,
+          doc_title: doc.title,
+          version_id: ver.version_id,
+          citation_code: doc.citation_code,
+          pages: pagesToRechunk,
+          run_id: runId,
+          now_iso: nowIso,
+          ocr_confidence: existingParents[0]?.ocr_confidence ?? 0.99,
+          first_parent_id:
+            ver.version_id === '33333333-3333-4333-8333-333333333301'
+              ? '44444444-4444-4444-8444-444444444401'
+              : undefined,
+        });
+
+        for (const pChunk of chunked.parentChunks) {
+          this.addChunk(pChunk);
+        }
+        const payloadHash = this.computePayloadHash(doc.doc_id, ver);
+        for (const cChunk of chunked.childChunks) {
+          const added = this.addChunk(cChunk);
+          if (added.ok) {
+            this.outbox.push({
+              outbox_id: this.nextOutboxId++,
+              chunk_id: cChunk.chunk_id,
+              doc_id: doc.doc_id,
+              op_type: 'upsert',
+              payload_hash: payloadHash,
+              created_at: nowIso,
+              processed_at: this.indexWorkerPaused ? null : nowIso,
+            });
+            const pt = this.buildQdrantPoint(cChunk);
+            if (pt) {
+              if (!this.indexWorkerPaused) {
+                this.qdrantPoints.set(cChunk.chunk_id, pt);
+              }
+              upsertedPoints.push(pt);
+            }
+          }
+        }
+      }
+    }
+
+    if (reprocessedCount > 0) {
+      this.semanticCache.clear();
+      this.corpusEpoch += 1;
+    }
+
+    return { reprocessedCount, removedChunkIds, upsertedPoints };
+  }
+
   public clone(): RegulatoryLedger {
     const copy = new RegulatoryLedger();
     copy.principals = structuredClone(this.principals);
@@ -962,5 +1078,55 @@ export class RegulatoryLedger {
       child_vectors: firstPageChildren,
       quarantined_items: docQuarantined,
     };
+  }
+
+  public getDocumentSummaryContext(docId: string): {
+    doc: RegulatoryDocument;
+    versionLabel: string;
+    contentHash: string;
+    excerpt: string;
+  } | null {
+    const doc = this.documents.find((d) => d.doc_id === docId);
+    if (!doc) return null;
+
+    const docVersions = [...this.versions.filter((v) => v.doc_id === docId)].sort(
+      (a, b) => new Date(a.effective_from).getTime() - new Date(b.effective_from).getTime()
+    );
+    const activeVersion = docVersions[docVersions.length - 1];
+    if (!activeVersion) {
+      return { doc, versionLabel: 'v1', contentHash: '', excerpt: '' };
+    }
+
+    const parents = this.chunks
+      .filter((c) => c.version_id === activeVersion.version_id && c.chunk_tier === 'parent')
+      .sort((a, b) => a.page_number - b.page_number);
+
+    const excerpt = parents
+      .map((p) => `[Page ${p.page_number}]\n${p.text_content}`)
+      .join('\n\n')
+      .slice(0, 12_000);
+
+    return {
+      doc,
+      versionLabel: activeVersion.version_label,
+      contentHash: activeVersion.content_hash,
+      excerpt,
+    };
+  }
+
+  public setDocumentSummary(
+    docId: string,
+    payload: { text: string; model: string; generated_at?: string } | { error: string }
+  ): void {
+    const doc = this.documents.find((d) => d.doc_id === docId);
+    if (!doc) return;
+    if ('error' in payload) {
+      doc.ai_summary_error = payload.error;
+    } else {
+      doc.ai_summary = payload.text;
+      doc.ai_summary_model = payload.model;
+      doc.ai_summary_generated_at = payload.generated_at ?? new Date().toISOString();
+      doc.ai_summary_error = null;
+    }
   }
 }

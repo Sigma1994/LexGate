@@ -33,6 +33,7 @@ import {
   hasCachedKeyInRedis,
   probeRedis,
 } from './src/server/redisClient.ts';
+import { ensureLedgerDocumentSummary } from './src/server/summarizer.ts';
 import { runDevSmokeEval, runVerificationSuite } from './src/server/verifier.ts';
 import type {
   ExecutionMode,
@@ -276,6 +277,8 @@ async function startServer() {
     if (!ledger.indexWorkerPaused && ingested.points.length > 0) {
       syncRes = await upsertPointsToQdrant(ingested.points);
     }
+
+    await ensureLedgerDocumentSummary(ledger, ingested.doc_id);
 
     const upload: UploadDocumentResult = {
       doc_id: ingested.doc_id,
@@ -601,6 +604,84 @@ async function startServer() {
       return res.status(404).json({ error: 'Document preview not found.' });
     }
     return res.json({ preview });
+  });
+
+  app.post('/api/admin/documents/:docId/summarize', async (req, res) => {
+    const { docId } = req.params;
+    const force = Boolean(req.body?.force);
+    const result = await ensureLedgerDocumentSummary(ledger, docId, { force });
+    const snapshot = ledger.getSnapshot();
+    if (!result.ok) {
+      return res.status(result.error === 'Document not found.' ? 404 : 502).json({
+        error: result.error ?? 'Failed to generate AI summary.',
+        snapshot,
+      });
+    }
+    return res.json({
+      doc_id: docId,
+      ai_summary: result.summary,
+      ai_summary_model: result.model,
+      ai_summary_generated_at: result.generated_at,
+      snapshot,
+    });
+  });
+
+  app.post('/api/admin/documents/bulk-delete', async (req, res) => {
+    const rawIds = req.body?.doc_ids;
+    if (!Array.isArray(rawIds) || rawIds.length === 0) {
+      return res.status(400).json({ error: 'Select at least one document ID to delete.' });
+    }
+    const docIds = rawIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0);
+    const outcome = ledger.bulkDeleteDocuments(docIds);
+    if (outcome.deletedCount === 0) {
+      return res.status(404).json({ error: 'No matching documents found to delete.' });
+    }
+    if (outcome.deletedChunkIds.length > 0) {
+      await deletePointsFromQdrant(outcome.deletedChunkIds);
+    }
+    void flushLexGateRedisKeys();
+    const runtime = await getSystemRuntimeStatus(true);
+    return res.json({
+      deleted_count: outcome.deletedCount,
+      snapshot: ledger.getSnapshot(),
+      runtime,
+    });
+  });
+
+  app.post('/api/admin/documents/bulk-reprocess', async (req, res) => {
+    const rawIds = req.body?.doc_ids;
+    if (!Array.isArray(rawIds) || rawIds.length === 0) {
+      return res.status(400).json({ error: 'Select at least one document ID to reprocess.' });
+    }
+    const docIds = rawIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0);
+    const outcome = ledger.reprocessDocuments(docIds);
+    if (outcome.reprocessedCount === 0) {
+      return res.status(404).json({ error: 'No matching documents found to reprocess.' });
+    }
+    if (outcome.removedChunkIds.length > 0) {
+      await deletePointsFromQdrant(outcome.removedChunkIds);
+    }
+    if (outcome.upsertedPoints.length > 0) {
+      try {
+        const qProbe = await probeQdrant();
+        if (qProbe.reachable) {
+          await upsertPointsToQdrant(outcome.upsertedPoints);
+        }
+      } catch {
+        // Non-fatal in preview mode
+      }
+    }
+    await Promise.all(
+      docIds.map((id) => ensureLedgerDocumentSummary(ledger, id, { force: true }))
+    );
+    void flushLexGateRedisKeys();
+    const runtime = await getSystemRuntimeStatus(true);
+    return res.json({
+      reprocessed_count: outcome.reprocessedCount,
+      vector_points_synced: outcome.upsertedPoints.length,
+      snapshot: ledger.getSnapshot(),
+      runtime,
+    });
   });
 
   app.delete('/api/admin/documents/:docId', async (req, res) => {
